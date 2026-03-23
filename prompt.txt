@@ -1,0 +1,3355 @@
+./prompt.txt
+---
+
+
+---
+./BLE Module/README.txt
+---
+BLE ATTENDANCE SYSTEM (ESP32 + SERVER)
+=====================================
+
+OVERVIEW
+--------
+This project implements a BLE-based attendance / beacon system using ESP32 and a Python Flask server.
+
+- ESP32 scans or broadcasts BLE beacons
+- A Python server dynamically generates minor values
+- Communication happens via HTTP over WiFi
+- Designed for proximity detection / attendance tracking
+
+
+PROJECT STRUCTURE
+-----------------
+
+Attendance/
+|
+|-- .pio/                  -> PlatformIO build files
+|-- .vscode/               -> VS Code settings
+|-- include/               -> Header files
+|-- lib/                   -> Libraries
+|-- src/
+|    |-- main.cpp          -> ESP32 main firmware
+|-- test/                  -> Test files
+|-- platformio.ini         -> PlatformIO config
+|-- .gitignore
+|-- server.py              -> Flask backend server
+
+
+REQUIREMENTS
+------------
+
+SERVER SIDE:
+- Python 3.11.0
+- Flask
+- requests
+
+Install dependencies:
+    pip install flask requests
+
+
+ESP32 SIDE:
+- ESP32 board
+- PlatformIO (recommended)
+- Libraries used:
+    - WiFi
+    - HTTPClient
+    - NimBLE
+
+
+HOW IT WORKS
+------------
+
+1. ESP32 connects to WiFi
+2. ESP32 sends request to server:
+       GET /getMinor?major=<value>
+3. Server generates a random minor value
+4. Server returns JSON response
+5. ESP32 uses:
+       - Fixed UUID
+       - Major value
+       - Received minor
+6. ESP32 starts BLE operation (scan/advertise)
+
+
+RUNNING THE PROJECT
+------------------
+
+STEP 1: Start the server
+
+    python server.py
+
+Server runs at:
+    http://<YOUR_IP>:4040
+
+
+STEP 2: Configure ESP32
+
+Edit src/main.cpp:
+
+    const char* ssid = "YOUR_WIFI";
+    const char* password = "YOUR_PASSWORD";
+
+    String serverURL = "http://<SERVER_IP>:4040/getMinor";
+
+
+STEP 3: Upload to ESP32
+
+Using PlatformIO:
+
+    pio run --target upload
+
+Or using VS Code:
+    Click "Build" and "Upload" button
+
+
+API ENDPOINT
+------------
+
+GET /getMinor
+
+Query parameter:
+    major (integer)
+
+Response:
+    {
+        "status": "success",
+        "minor": <random_value>
+    }
+
+
+KNOWN ISSUE (IMPORTANT)
+----------------------
+
+If you see error like:
+
+    Failed to establish a new connection: nodename nor servname provided
+
+This is because:
+
+    LOG_ENDPOINT = "http://aaaaa/api/beacons/events"
+
+"aaaaa" is not a valid server address.
+
+Fix:
+- Replace with real IP or URL
+- Or disable logging if not needed
+
+
+TESTING
+-------
+
+Used our Swift App for iOS
+
+Use BLE apps:
+- nRF Connect
+- BLE Scanner
+
+Expected:
+- Beacon UUID visible
+- Major value
+- Changing minor values
+
+
+NOTES
+-----
+
+- ESP32 and server must be on same network
+- iOS has BLE limitations
+- Ensure firewall is not blocking port 4040
+
+
+FUTURE IMPROVEMENTS
+-------------------
+
+- Store attendance logs in database
+- Improve RSSI-based distance estimation
+- Improve the mobile app flow process
+- Handle multiple classrooms
+
+
+AUTHOR
+------
+
+Kosaraju Jyothsna Abhay
+ES22BTECH11021
+IIT Hyderabad
+
+
+---
+./BLE Module/server.py
+---
+import random
+import requests
+from flask import Flask, request, jsonify
+from collections import defaultdict, deque
+from datetime import datetime, timezone
+
+app = Flask(__name__)
+
+# Logging endpoint [to be updated from the backend side]
+LOG_ENDPOINT = "http://aaaaa/api/beacons/events"
+
+# Caching
+major_cache = defaultdict(lambda: deque(maxlen=2))
+
+
+@app.route('/getMinor', methods=['GET'])
+def handle_major():
+    major_value = request.args.get('major')
+
+    if not major_value:
+        return "missing major", 400
+
+    major_value = int(major_value)
+    now = datetime.now(timezone.utc)
+
+    # Check cache
+    if major_value in major_cache and len(major_cache[major_value]) > 0:
+        latest_entry = major_cache[major_value][-1]
+
+        last_time = datetime.fromisoformat(latest_entry["timestamp"])
+        time_diff = (now - last_time).total_seconds()
+
+        # If last minor was generated within 30 seconds → reuse
+        if time_diff <= 30:
+            print(f"Reusing minor for major {major_value}: {latest_entry['minor']}")
+            return str(latest_entry["minor"]), 200
+
+    # Otherwise generate new minor
+    minor_value = random.randint(0, 65535)
+    timestamp = now.isoformat()
+
+    log_data = {
+        "major": major_value,
+        "minor": minor_value,
+        "timestamp": timestamp
+    }
+
+    # Store in cache (deque will auto pop old if >2)
+    major_cache[major_value].append(log_data)
+
+    # Send log to external DB server
+    try:
+        requests.post(LOG_ENDPOINT, json=log_data, timeout=2)
+    except Exception as e:
+        print("Logging server unreachable:", e)
+
+    print(f"Generated new minor: {minor_value} for major {major_value}")
+
+    return str(minor_value), 200
+
+
+@app.route('/validate', methods=['GET'])
+def validate_minor():
+    major_value = request.args.get('major')
+    minor_value = request.args.get('minor')
+
+    if not major_value or not minor_value:
+        return jsonify({"valid": False, "error": "missing major or minor"}), 400
+
+    major_value = int(major_value)
+    minor_value = int(minor_value)
+
+    if major_value not in major_cache:
+        return jsonify({"valid": False})
+
+    for entry in major_cache[major_value]:
+        if entry["minor"] == minor_value:
+            return jsonify({"valid": True})
+
+    return jsonify({"valid": False})
+
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=4040)
+
+---
+./BLE Module/swagger.yaml
+---
+swagger: "2.0"
+info:
+  title: Beacon API
+  version: "1.0"
+
+host: localhost:4040
+basePath: /
+schemes:
+  - http
+
+paths:
+
+  /getMinor:
+    get:
+      summary: Get minor for a given major
+      parameters:
+        - name: major
+          in: query
+          required: true
+          type: integer
+      responses:
+        200:
+          description: Minor value returned
+          schema:
+            type: string
+            example: "52344"
+        400:
+          description: Missing major
+          schema:
+            type: string
+            example: "missing major"
+
+  /validate:
+    get:
+      summary: Validate major-minor pair
+      parameters:
+        - name: major
+          in: query
+          required: true
+          type: integer
+        - name: minor
+          in: query
+          required: true
+          type: integer
+      responses:
+        200:
+          description: Validation result
+          schema:
+            type: object
+            properties:
+              valid:
+                type: boolean
+                example: true
+        400:
+          description: Missing parameters
+          schema:
+            type: object
+            properties:
+              valid:
+                type: boolean
+                example: false
+              error:
+                type: string
+                example: missing major or minor
+
+---
+./BLE Module/Attendance/platformio.ini
+---
+; PlatformIO Project Configuration File
+;
+;   Build options: build flags, source filter
+;   Upload options: custom upload port, speed and extra flags
+;   Library options: dependencies, extra library storages
+;   Advanced options: extra scripting
+;
+; Please visit documentation for the other options and examples
+; https://docs.platformio.org/page/projectconf.html
+
+[env:esp32dev]
+platform = espressif32
+board = esp32dev
+framework = arduino
+monitor_speed = 115200
+upload_port = /dev/cu.SLAB_USBtoUART
+monitor_port = /dev/cu.SLAB_USBtoUART
+
+lib_deps =
+    h2zero/NimBLE-Arduino
+
+---
+./BLE Module/Attendance/src/main.cpp
+---
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <NimBLEDevice.h>
+
+// ---------------- WIFI ----------------
+const char* ssid = "WaitForIt";
+const char* password = "azsxdcfv";
+
+// ---------------- SERVER ----------------
+String serverURL = "http://192.168.0.110:4040/getMinor";
+
+// ---------------- BEACON ----------------
+uint16_t major = 100;
+uint16_t minor = 0;
+
+NimBLEAdvertising *pAdvertising;
+
+
+// Correct UUID bytes
+// BEACON_UUID "550e8400-e29b-41d4-a716-446655440000"
+uint8_t uuidBytes[16] = {
+  0x55, 0x0e, 0x84, 0x00,
+  0xe2, 0x9b,
+  0x41, 0xd4,
+  0xa7, 0x16,
+  0x44, 0x66, 0x55, 0x44, 0x00, 0x00
+};
+
+
+// ---------------- WIFI ----------------
+void connectWiFi() {
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+
+  Serial.println("Connecting to WiFi...");
+
+  int attempts = 0;
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+    Serial.print(".");
+    attempts++;
+
+    if (attempts > 20) {
+      Serial.println("\nFailed to connect.");
+      return;
+    }
+  }
+
+  Serial.println("\nConnected!");
+  Serial.print("IP: ");
+  Serial.println(WiFi.localIP());
+}
+
+
+// ---------------- FETCH MINOR ----------------
+uint16_t fetchMinor() {
+
+  if (WiFi.status() == WL_CONNECTED) {
+
+    HTTPClient http;
+    String requestURL = serverURL + "?major=" + String(major);
+
+    Serial.println(requestURL);
+
+    http.begin(requestURL);
+    int httpCode = http.GET();
+
+    if (httpCode == 200) {
+      String payload = http.getString();
+      Serial.println("Minor: " + payload);
+      http.end();
+      return payload.toInt();
+    }
+
+    http.end();
+  }
+
+  return 0;
+}
+
+
+// ---------------- BUILD IBEACON ----------------
+std::string createBeaconData(uint16_t major, uint16_t minor) {
+
+  std::string data = "";
+
+  // Apple Company ID
+  data += (char)0x4C;
+  data += (char)0x00;
+
+  // iBeacon Type + Length
+  data += (char)0x02;
+  data += (char)0x15;
+
+  // UUID
+  data.append((char*)uuidBytes, 16);
+
+  // Major
+  data += (char)(major >> 8);
+  data += (char)(major & 0xFF);
+
+  // Minor
+  data += (char)(minor >> 8);
+  data += (char)(minor & 0xFF);
+
+  // TX Power
+  data += (char)0xC5;
+
+  return data;
+}
+
+
+// ---------------- START BEACON ----------------
+void startBeacon(uint16_t major, uint16_t minor) {
+
+  NimBLEAdvertisementData advData;
+
+  std::string payload = createBeaconData(major, minor);
+
+  advData.setManufacturerData(payload);
+
+  pAdvertising->setAdvertisementData(advData);
+
+  pAdvertising->setMinInterval(0x20);  // ~20ms
+  pAdvertising->setMaxInterval(0x40);  // ~40ms
+
+  pAdvertising->start();
+
+  Serial.println("Beacon broadcasting");
+}
+
+
+// ---------------- SETUP ----------------
+void setup() {
+
+  Serial.begin(115200);
+
+  connectWiFi();
+
+  NimBLEDevice::init("ESP32 Beacon");
+
+  pAdvertising = NimBLEDevice::getAdvertising();
+
+  minor = fetchMinor();
+
+  if (minor == 0) minor = 1;
+
+  startBeacon(major, minor);
+}
+
+
+// ---------------- LOOP ----------------
+void loop() {
+
+  delay(30000);  // update every 30s
+
+  uint16_t newMinor = fetchMinor();
+
+  if (newMinor != 0 && newMinor != minor) {
+
+    minor = newMinor;
+
+    pAdvertising->stop();
+    startBeacon(major, minor);
+
+    Serial.println("Beacon updated");
+  }
+}
+
+---
+./BLE Module/Attendance/include/README
+---
+
+This directory is intended for project header files.
+
+A header file is a file containing C declarations and macro definitions
+to be shared between several project source files. You request the use of a
+header file in your project source file (C, C++, etc) located in `src` folder
+by including it, with the C preprocessing directive `#include'.
+
+```src/main.c
+
+#include "header.h"
+
+int main (void)
+{
+ ...
+}
+```
+
+Including a header file produces the same results as copying the header file
+into each source file that needs it. Such copying would be time-consuming
+and error-prone. With a header file, the related declarations appear
+in only one place. If they need to be changed, they can be changed in one
+place, and programs that include the header file will automatically use the
+new version when next recompiled. The header file eliminates the labor of
+finding and changing all the copies as well as the risk that a failure to
+find one copy will result in inconsistencies within a program.
+
+In C, the convention is to give header files names that end with `.h'.
+
+Read more about using header files in official GCC documentation:
+
+* Include Syntax
+* Include Operation
+* Once-Only Headers
+* Computed Includes
+
+https://gcc.gnu.org/onlinedocs/cpp/Header-Files.html
+
+
+---
+./BLE Module/Attendance/lib/README
+---
+
+This directory is intended for project specific (private) libraries.
+PlatformIO will compile them to static libraries and link into the executable file.
+
+The source code of each library should be placed in a separate directory
+("lib/your_library_name/[Code]").
+
+For example, see the structure of the following example libraries `Foo` and `Bar`:
+
+|--lib
+|  |
+|  |--Bar
+|  |  |--docs
+|  |  |--examples
+|  |  |--src
+|  |     |- Bar.c
+|  |     |- Bar.h
+|  |  |- library.json (optional. for custom build options, etc) https://docs.platformio.org/page/librarymanager/config.html
+|  |
+|  |--Foo
+|  |  |- Foo.c
+|  |  |- Foo.h
+|  |
+|  |- README --> THIS FILE
+|
+|- platformio.ini
+|--src
+   |- main.c
+
+Example contents of `src/main.c` using Foo and Bar:
+```
+#include <Foo.h>
+#include <Bar.h>
+
+int main (void)
+{
+  ...
+}
+
+```
+
+The PlatformIO Library Dependency Finder will find automatically dependent
+libraries by scanning project source files.
+
+More information about PlatformIO Library Dependency Finder
+- https://docs.platformio.org/page/librarymanager/ldf.html
+
+
+---
+./BLE Module/Attendance/test/README
+---
+
+This directory is intended for PlatformIO Test Runner and project tests.
+
+Unit Testing is a software testing method by which individual units of
+source code, sets of one or more MCU program modules together with associated
+control data, usage procedures, and operating procedures, are tested to
+determine whether they are fit for use. Unit testing finds problems early
+in the development cycle.
+
+More information about PlatformIO Unit Testing:
+- https://docs.platformio.org/en/latest/advanced/unit-testing/index.html
+
+
+---
+./Attendance_springboot/pom.xml
+---
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.2.3</version>
+    </parent>
+
+    <groupId>com.attendance</groupId>
+    <artifactId>attendance-backend</artifactId>
+    <version>1.0.0</version>
+    <name>attendance-backend</name>
+
+    <properties>
+        <java.version>17</java.version>
+        <jjwt.version>0.12.5</jjwt.version>
+    </properties>
+
+    <dependencies>
+        <!-- Web -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+
+        <!-- MongoDB -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-mongodb</artifactId>
+        </dependency>
+
+        <!-- Security -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security</artifactId>
+        </dependency>
+
+        <!-- JWT -->
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-api</artifactId>
+            <version>${jjwt.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-impl</artifactId>
+            <version>${jjwt.version}</version>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-jackson</artifactId>
+            <version>${jjwt.version}</version>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!-- Validation -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+
+        <!-- Lombok -->
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <optional>true</optional>
+        </dependency>
+
+        <!-- QR Code -->
+        <dependency>
+            <groupId>com.google.zxing</groupId>
+            <artifactId>core</artifactId>
+            <version>3.5.3</version>
+        </dependency>
+        <dependency>
+            <groupId>com.google.zxing</groupId>
+            <artifactId>javase</artifactId>
+            <version>3.5.3</version>
+        </dependency>
+
+        <!-- Test -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <excludes>
+                        <exclude>
+                            <groupId>org.projectlombok</groupId>
+                            <artifactId>lombok</artifactId>
+                        </exclude>
+                    </excludes>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>
+
+
+---
+./Attendance_springboot/target/classes/application.yml
+---
+
+
+---
+./Attendance_springboot/target/maven-status/maven-compiler-plugin/compile/default-compile/createdFiles.lst
+---
+
+
+---
+./Attendance_springboot/target/maven-status/maven-compiler-plugin/compile/default-compile/inputFiles.lst
+---
+
+
+---
+./Attendance_springboot/src/main/java/com/attendance/AttendanceApplication.java
+---
+
+
+---
+./Attendance_springboot/src/main/java/com/attendance/repository/AttendanceRepository.java
+---
+
+
+---
+./Attendance_springboot/src/main/java/com/attendance/repository/SessionRepository.java
+---
+
+
+---
+./Attendance_springboot/src/main/java/com/attendance/repository/StudentRepository.java
+---
+
+
+---
+./Attendance_springboot/src/main/java/com/attendance/repository/UserRepository.java
+---
+
+
+---
+./Attendance_springboot/src/main/java/com/attendance/model/Attendance.java
+---
+
+
+---
+./Attendance_springboot/src/main/java/com/attendance/model/Session.java
+---
+
+
+---
+./Attendance_springboot/src/main/java/com/attendance/model/Student.java
+---
+
+
+---
+./Attendance_springboot/src/main/java/com/attendance/model/User.java
+---
+
+
+---
+./Attendance_springboot/src/main/java/com/attendance/service/AnalyticsService.java
+---
+
+
+---
+./Attendance_springboot/src/main/java/com/attendance/service/AttendanceService.java
+---
+
+
+---
+./Attendance_springboot/src/main/java/com/attendance/service/AuthService.java
+---
+
+
+---
+./Attendance_springboot/src/main/java/com/attendance/service/SessionService.java
+---
+
+
+---
+./Attendance_springboot/src/main/java/com/attendance/service/StudentService.java
+---
+
+
+---
+./Attendance_springboot/src/main/java/com/attendance/security/HmacService.java
+---
+
+
+---
+./Attendance_springboot/src/main/java/com/attendance/security/JwtAuthFilter.java
+---
+
+
+---
+./Attendance_springboot/src/main/java/com/attendance/security/JwtService.java
+---
+
+
+---
+./Attendance_springboot/src/main/java/com/attendance/exception/GlobalExceptionHandler.java
+---
+
+
+---
+./Attendance_springboot/src/main/java/com/attendance/controller/AnalyticsController.java
+---
+
+
+---
+./Attendance_springboot/src/main/java/com/attendance/controller/AttendanceController.java
+---
+
+
+---
+./Attendance_springboot/src/main/java/com/attendance/controller/AuthController.java
+---
+
+
+---
+./Attendance_springboot/src/main/java/com/attendance/controller/SessionController.java
+---
+
+
+---
+./Attendance_springboot/src/main/java/com/attendance/controller/StudentController.java
+---
+
+
+---
+./Attendance_springboot/src/main/java/com/attendance/dto/AttendanceDto.java
+---
+
+
+---
+./Attendance_springboot/src/main/java/com/attendance/dto/AuthDto.java
+---
+
+
+---
+./Attendance_springboot/src/main/java/com/attendance/config/SecurityConfig.java
+---
+
+
+---
+./Attendance_springboot/src/main/resources/application.yml
+---
+
+
+---
+./Frontend-iOS/README.md
+---
+# AttendanceApp — iOS Frontend
+
+**Digital Intelligent Attendance Management System (DIAMS)**
+IIT Hyderabad | Swift + SwiftUI | Sprint 2
+
+---
+
+## Overview
+
+An iOS app for managing classroom attendance using QR codes, BLE beacons, and face verification. Supports three roles: Student, Professor, and Admin.
+
+---
+
+## Tech Stack
+
+- **Language:** Swift 5
+- **UI Framework:** SwiftUI
+- **Camera:** AVFoundation (QR scan + face capture)
+- **BLE/iBeacon:** CoreLocation (`CLLocationManager` + `CLBeaconRegion`)
+- **Min Target:** iOS 16+
+- **Device:** iPhone / iPad
+
+---
+
+## File Structure
+
+```
+AttendanceApp/
+├── AttendanceAppApp.swift
+├── ContentView.swift
+├── RoleSelectionView.swift
+├── LoginView.swift
+├── MainTabView.swift
+├── DashboardView.swift
+├── ActiveSessionsView.swift
+├── ProfessorView.swift
+├── QRScannerView.swift
+├── FaceCaptureView.swift
+├── BLEScannerView.swift
+├── Helpers.swift
+├── Info.plist
+└── Assets.xcassets/
+    ├── iithlogo.imageset/
+    └── AppIcon.appiconset/
+```
+
+---
+
+## File Descriptions
+
+### `AttendanceAppApp.swift`
+Auto-generated by Xcode. Entry point of the app. Sets `ContentView` as the root view. Do not modify.
+
+---
+
+### `ContentView.swift`
+**Router.** Holds `@State isLoggedIn` and `@State role: UserRole`. Switches between `RoleSelectionView` (logged out) and the appropriate tab view based on role. Applies `.preferredColorScheme(.light)` globally.
+
+---
+
+### `RoleSelectionView.swift`
+**Role selection screen.** Shown before login. Displays three selectable role cards — Student, Professor, Admin — using the reusable `RoleButton` component. Navigates to `LoginView` with the selected role on "Continue".
+
+---
+
+### `LoginView.swift`
+**Login screen.** Accepts email and password. Displays role-specific title ("Sign In as Student/Professor/Admin"). Currently uses mock login (open endpoints for Sprint 2) — sets `isLoggedIn = true` and passes the role back to `ContentView`.
+
+---
+
+### `MainTabView.swift`
+**Navigation containers + profile.** Contains:
+- `StudentTabView` — bottom tab bar with Dashboard and Active Sessions tabs
+- `ProfessorTabView` — bottom tab bar with Schedule, Courses, and Analytics tabs
+- `ProfileToolbarButton` — reusable profile icon overlay (top-right)
+- `ProfileSheet` — bottom sheet showing user name, email, ID, and Log Out button
+
+---
+
+### `DashboardView.swift`
+**Student attendance analytics screen.** Shows:
+- Overall attendance percentage card with progress bar
+- `SubjectCard` — reusable component with colored banner header, subject name, code, progress bar, and color-coded attendance % (green ≥75%, orange ≥60%, red <60%)
+
+Data is currently hardcoded in `@State`. Marked with `TODO` for backend integration.
+
+**Models defined here:** `Subject`
+
+---
+
+### `ActiveSessionsView.swift`
+**Student active sessions + attendance flow.** Contains:
+- `StudentSessionsView` — lists active class sessions (currently two hardcoded: one QR, one BLE)
+- `SessionCard` — reusable card component for each active session
+- `MarkAttendanceFlow` — two-step attendance flow:
+  - Step 1: QR scan (back camera) or BLE scan depending on professor's chosen mode
+  - Step 2: Face capture (front camera)
+  - Step 3: Success screen
+- `StepDot` — reusable step indicator component
+- `AttendanceMode` enum — `.qr` or `.ble`
+
+---
+
+### `ProfessorView.swift`
+**All professor-facing screens.** Contains:
+
+| Component | Description |
+|---|---|
+| `ProfessorScheduleView` | Lists all professor's classes with banner cards showing name, code, room, timing, and day chips |
+| `ScheduleCard` | Reusable class card with colored banner and day chips (Mon/Tue/etc.) |
+| `ClassDetailView` | Per-class detail: start session (QR/BLE/Manual buttons) + scheduled attendances list |
+| `ScheduleRow` | Single row in the schedule list with alarm icon, label, time, mode, and toggle |
+| `AddScheduleSheet` | Bottom sheet to add a new scheduled attendance (label, time, mode) |
+| `ProfQRSessionView` | QR attendance session: 2-min timer + QR image refreshing every 4 seconds (TODO: fetch from backend) |
+| `ProfBLESessionView` | BLE attendance session: 2-min timer + active beacon indicator |
+| `ProfManualSessionView` | Manual attendance: student list with name + roll number, tap-to-toggle present/absent, Mark All, Submit |
+| `ProfessorSessionView` | "Courses" tab — shows today's classes for quick session start |
+| `ProfessorAnalyticsView` | Lists all courses with overall attendance % |
+| `CourseAnalyticsCard` | Reusable course card with banner and progress bar |
+| `CourseAnalyticsDetailView` | Per-course student list with individual attendance stats |
+
+**Models defined here:** `ScheduledClass`, `AttendanceSchedule`, `ProfMode`, `StudentRecord`, `CourseAnalytics`
+
+---
+
+### `QRScannerView.swift`
+**Back camera QR scanner.** Contains:
+- `QRScannerVC` — `UIViewController` using `AVCaptureSession` with `AVCaptureMetadataOutput` to decode QR codes via the back camera
+- `QRScannerView` — `UIViewControllerRepresentable` wrapper for SwiftUI
+- `StudentQRScanView` — full screen QR scan view with success state and "Continue" button (currently unused — QR scanner is embedded directly in `MarkAttendanceFlow`)
+
+---
+
+### `FaceCaptureView.swift`
+**Front camera face capture.** Contains:
+- `FaceCaptureVC` — `UIViewController` using `AVCaptureSession` with `AVCapturePhotoOutput` and front camera. Renders live preview and captures photo on button tap
+- `FaceCaptureView` — `UIViewControllerRepresentable` wrapper for SwiftUI
+- `StudentFaceVerifyView` — full screen face capture view with captured image preview and "Done" button (currently unused — face capture is embedded directly in `MarkAttendanceFlow`)
+
+Captured `UIImage` is marked with `TODO` for POST to backend face verification API.
+
+---
+
+### `BLEScannerView.swift`
+**iBeacon BLE scanner.** Contains:
+- `BLEScanner` — `ObservableObject` using `CLLocationManager` to range iBeacons with UUID `550e8400-e29b-41d4-a716-446655440000`. On scan button tap, ranges for 3 seconds, collects RSSI readings, calculates mean RSSI, and extracts major/minor from `CLBeacon`
+- `StudentBLEScanView` — UI with 2-min session countdown, scan button, 3-second scan countdown (3→2→1), and result card showing Major, Minor, Mean RSSI
+
+Result is marked with `TODO` for POST to backend.
+
+**Requires:** Location permission (`NSLocationWhenInUseUsageDescription`)
+
+---
+
+### `Helpers.swift`
+**Shared utilities.** Contains:
+- `CornerShape` — pure SwiftUI `Shape` for applying border radius to specific corners (top-left, top-right, bottom-left, bottom-right). Used by all banner cards throughout the app.
+
+---
+
+### `Info.plist`
+App permissions:
+| Key | Purpose |
+|---|---|
+| `NSCameraUsageDescription` | QR scanning + face capture |
+| `NSBluetoothAlwaysUsageDescription` | BLE beacon detection |
+| `NSBluetoothPeripheralUsageDescription` | BLE beacon detection |
+| `NSLocationWhenInUseUsageDescription` | iBeacon ranging via CoreLocation |
+
+---
+
+## Role-Based Navigation
+
+```
+App Launch
+└── RoleSelectionView → LoginView
+    ├── Student  → StudentTabView
+    │   ├── Dashboard (DashboardView)
+    │   └── Active Sessions (StudentSessionsView)
+    │       └── Mark Attendance → MarkAttendanceFlow
+    │           ├── Step 1: QR Scan (QRScannerView) or BLE Scan (StudentBLEScanView)
+    │           └── Step 2: Face Capture (FaceCaptureView)
+    ├── Professor → ProfessorTabView
+    │   ├── Schedule (ProfessorScheduleView) → ClassDetailView
+    │   │   ├── QR Session (ProfQRSessionView)
+    │   │   ├── BLE Session (ProfBLESessionView)
+    │   │   └── Manual Session (ProfManualSessionView)
+    │   ├── Courses (ProfessorSessionView)
+    │   └── Analytics (ProfessorAnalyticsView) → CourseAnalyticsDetailView
+    └── Admin → ProfessorTabView (same as Professor, Sprint 3)
+```
+
+---
+
+## Backend Integration Points
+
+All backend calls are marked with `// TODO:` comments:
+
+| Location | Action |
+|---|---|
+| `LoginView.swift` | POST credentials, receive JWT token |
+| `DashboardView.swift` | GET student attendance per subject |
+| `ActiveSessionsView.swift` | GET active session + professor-chosen mode |
+| `ProfQRSessionView.swift` | GET dynamic QR (refresh every 3–5s) |
+| `ProfManualSessionView.swift` | POST manual attendance list |
+| `BLEScannerView.swift` | POST major, minor, mean RSSI |
+| `FaceCaptureView.swift` | POST face image for verification |
+| `ProfessorView.swift` | GET schedule, GET student list, GET analytics |
+
+---
+
+## Running the App
+
+1. Open `AttendanceApp.xcodeproj` in Xcode
+2. Select an iPhone/iPad simulator or connect a real device
+3. `Cmd + R` to build and run
+4. Camera and BLE features require a **real device** (simulator has no camera or Bluetooth)
+5. On first run, grant Camera, Bluetooth, and Location permissions when prompted
+
+
+---
+./Frontend-iOS/AttendanceApp.xcodeproj/project.pbxproj
+---
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXFileReference section */
+		58D960782F68BEAC00072149 /* AttendanceApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AttendanceApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		58D960992F68EBC300072149 /* Exceptions for "AttendanceApp" folder in "AttendanceApp" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = 58D960772F68BEAC00072149 /* AttendanceApp */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		58D9607A2F68BEAC00072149 /* AttendanceApp */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				58D960992F68EBC300072149 /* Exceptions for "AttendanceApp" folder in "AttendanceApp" target */,
+			);
+			path = AttendanceApp;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		58D960752F68BEAC00072149 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		58D9606F2F68BEAC00072149 = {
+			isa = PBXGroup;
+			children = (
+				58D9607A2F68BEAC00072149 /* AttendanceApp */,
+				58D960792F68BEAC00072149 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		58D960792F68BEAC00072149 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				58D960782F68BEAC00072149 /* AttendanceApp.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		58D960772F68BEAC00072149 /* AttendanceApp */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 58D960832F68BEAD00072149 /* Build configuration list for PBXNativeTarget "AttendanceApp" */;
+			buildPhases = (
+				58D960742F68BEAC00072149 /* Sources */,
+				58D960752F68BEAC00072149 /* Frameworks */,
+				58D960762F68BEAC00072149 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				58D9607A2F68BEAC00072149 /* AttendanceApp */,
+			);
+			name = AttendanceApp;
+			packageProductDependencies = (
+			);
+			productName = AttendanceApp;
+			productReference = 58D960782F68BEAC00072149 /* AttendanceApp.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		58D960702F68BEAC00072149 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2630;
+				LastUpgradeCheck = 2630;
+				TargetAttributes = {
+					58D960772F68BEAC00072149 = {
+						CreatedOnToolsVersion = 26.3;
+					};
+				};
+			};
+			buildConfigurationList = 58D960732F68BEAC00072149 /* Build configuration list for PBXProject "AttendanceApp" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 58D9606F2F68BEAC00072149;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 58D960792F68BEAC00072149 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				58D960772F68BEAC00072149 /* AttendanceApp */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		58D960762F68BEAC00072149 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		58D960742F68BEAC00072149 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		58D960812F68BEAD00072149 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		58D960822F68BEAD00072149 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SWIFT_COMPILATION_MODE = wholemodule;
+			};
+			name = Release;
+		};
+		58D960842F68BEAD00072149 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = MX7LP765TP;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SELECTED_FILES = readonly;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = AttendanceApp/Info.plist;
+				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
+				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
+				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
+				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphonesimulator*]" = YES;
+				"INFOPLIST_KEY_UILaunchScreen_Generation[sdk=iphoneos*]" = YES;
+				"INFOPLIST_KEY_UILaunchScreen_Generation[sdk=iphonesimulator*]" = YES;
+				"INFOPLIST_KEY_UIStatusBarStyle[sdk=iphoneos*]" = UIStatusBarStyleDefault;
+				"INFOPLIST_KEY_UIStatusBarStyle[sdk=iphonesimulator*]" = UIStatusBarStyleDefault;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
+				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
+				MACOSX_DEPLOYMENT_TARGET = 26.2;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = AttendanceManagementSystem.AttendanceApp;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
+				SDKROOT = auto;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				XROS_DEPLOYMENT_TARGET = 26.2;
+			};
+			name = Debug;
+		};
+		58D960852F68BEAD00072149 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = MX7LP765TP;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SELECTED_FILES = readonly;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = AttendanceApp/Info.plist;
+				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
+				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
+				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
+				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphonesimulator*]" = YES;
+				"INFOPLIST_KEY_UILaunchScreen_Generation[sdk=iphoneos*]" = YES;
+				"INFOPLIST_KEY_UILaunchScreen_Generation[sdk=iphonesimulator*]" = YES;
+				"INFOPLIST_KEY_UIStatusBarStyle[sdk=iphoneos*]" = UIStatusBarStyleDefault;
+				"INFOPLIST_KEY_UIStatusBarStyle[sdk=iphonesimulator*]" = UIStatusBarStyleDefault;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
+				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
+				MACOSX_DEPLOYMENT_TARGET = 26.2;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = AttendanceManagementSystem.AttendanceApp;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
+				SDKROOT = auto;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				XROS_DEPLOYMENT_TARGET = 26.2;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		58D960732F68BEAC00072149 /* Build configuration list for PBXProject "AttendanceApp" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				58D960812F68BEAD00072149 /* Debug */,
+				58D960822F68BEAD00072149 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		58D960832F68BEAD00072149 /* Build configuration list for PBXNativeTarget "AttendanceApp" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				58D960842F68BEAD00072149 /* Debug */,
+				58D960852F68BEAD00072149 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 58D960702F68BEAC00072149 /* Project object */;
+}
+
+
+---
+./Frontend-iOS/AttendanceApp.xcodeproj/xcuserdata/sreehithsanam.xcuserdatad/xcschemes/xcschememanagement.plist
+---
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>SchemeUserState</key>
+	<dict>
+		<key>AttendanceApp.xcscheme_^#shared#^_</key>
+		<dict>
+			<key>orderHint</key>
+			<integer>0</integer>
+		</dict>
+	</dict>
+</dict>
+</plist>
+
+
+---
+./Frontend-iOS/AttendanceApp.xcodeproj/project.xcworkspace/contents.xcworkspacedata
+---
+<?xml version="1.0" encoding="UTF-8"?>
+<Workspace
+   version = "1.0">
+   <FileRef
+      location = "self:">
+   </FileRef>
+</Workspace>
+
+
+---
+./Frontend-iOS/AttendanceApp/ActiveSessionsView.swift
+---
+import SwiftUI
+
+// MARK: - Student Active Sessions
+struct StudentSessionsView: View {
+    @State private var professorMode: AttendanceMode = .qr   // TODO: fetch from backend
+
+    var body: some View {
+        NavigationView {
+            ScrollView {
+                VStack(spacing: 16) {
+                    // Session 1 — QR (professor-driven mode)
+                    SessionCard(
+                        title: "Swift App Dev",
+                        subtitle: "Prof. Smith  •  Room 304",
+                        mode: professorMode,
+                        destination: AnyView(MarkAttendanceFlow(mode: professorMode))
+                    )
+
+                    // Session 2 — BLE (hardcoded)
+                    SessionCard(
+                        title: "Machine Learning",
+                        subtitle: "Prof. Rao  •  Room 101",
+                        mode: .ble,
+                        destination: AnyView(MarkAttendanceFlow(mode: .ble))
+                    )
+                }
+                .padding(.vertical)
+            }
+            .background(Color.gray.opacity(0.1))
+            .navigationTitle("Active Sessions")
+        }
+    }
+}
+
+// Reusable session card
+struct SessionCard: View {
+    let title: String
+    let subtitle: String
+    let mode: AttendanceMode
+    let destination: AnyView
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ZStack(alignment: .bottomLeading) {
+                Color(red: 0.102, green: 0.451, blue: 0.910).frame(height: 60)
+                Text(title).font(.headline).bold().foregroundColor(.white)
+                    .padding([.leading, .bottom], 12)
+            }
+            .clipShape(CornerShape(radius: 15, corners: [.topLeft, .topRight]))
+
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 6) {
+                    Circle().fill(Color.red).frame(width: 8, height: 8)
+                    Text("Currently Active").font(.caption).bold().foregroundColor(.red)
+                }
+                Text(subtitle).font(.subheadline).foregroundColor(.secondary)
+                HStack {
+                    Label("Mode:", systemImage: "info.circle").font(.caption).foregroundColor(.secondary)
+                    Text(mode.label).font(.caption).bold()
+                        .foregroundColor(Color(red: 0.102, green: 0.451, blue: 0.910))
+                }
+                Divider()
+                NavigationLink(destination: destination) {
+                    Text("Mark Attendance")
+                        .font(.headline).foregroundColor(.white)
+                        .frame(maxWidth: .infinity).padding()
+                        .background(Color(red: 0.102, green: 0.451, blue: 0.910))
+                        .cornerRadius(10)
+                }
+            }
+            .padding(14)
+            .background(Color.white)
+            .clipShape(CornerShape(radius: 15, corners: [.bottomLeft, .bottomRight]))
+        }
+        .shadow(color: Color.black.opacity(0.08), radius: 5, x: 0, y: 2)
+        .padding(.horizontal)
+    }
+}
+
+// MARK: - Mark Attendance Flow: QR/BLE → then Face Verify
+enum AttendanceMode {
+    case qr, ble
+    var label: String { self == .qr ? "QR Scan" : "BLE Scan" }
+    var icon: String  { self == .qr ? "qrcode.viewfinder" : "antenna.radiowaves.left.and.right" }
+}
+
+struct MarkAttendanceFlow: View {
+    let mode: AttendanceMode
+    @State private var step = 1   // 1 = QR/BLE, 2 = Face Verify, 3 = Done
+
+    var body: some View {
+        VStack(spacing: 32) {
+            // Step indicator
+            HStack(spacing: 0) {
+                StepDot(num: 1, label: mode.label,    active: step >= 1)
+                Rectangle().frame(height: 2)
+                    .foregroundColor(step >= 2 ? Color(red: 0.102, green: 0.451, blue: 0.910) : Color.gray.opacity(0.3))
+                StepDot(num: 2, label: "Face Verify", active: step >= 2)
+            }
+            .padding(.horizontal, 40)
+            .padding(.top, 32)
+
+            Spacer()
+
+            if step == 1 {
+                if mode == .qr {
+                    QRScannerView { _ in step = 2 }
+                        .frame(height: 340)
+                        .cornerRadius(16)
+                        .padding(.horizontal)
+                } else {
+                    // Real BLE scan
+                    StudentBLEScanView { step = 2 }
+                }
+            } else if step == 2 {
+                // Real front camera capture
+                FaceCaptureView { _ in
+                    // TODO: send image to backend for verification
+                    step = 3
+                }
+                .frame(height: 400)
+                .cornerRadius(16)
+                .padding(.horizontal)
+            } else {
+                VStack(spacing: 12) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 72))
+                        .foregroundColor(Color(red: 0.204, green: 0.659, blue: 0.325))
+                    Text("Attendance Marked!")
+                        .font(.title2).bold()
+                    Text("You're all set for this class.")
+                        .font(.subheadline).foregroundColor(.secondary)
+                }
+            }
+
+            Spacer()
+        }
+        .navigationTitle("Mark Attendance")
+        .background(Color.gray.opacity(0.07).ignoresSafeArea())
+    }
+}
+
+struct StepDot: View {
+    let num: Int
+    let label: String
+    let active: Bool
+    private let gBlue = Color(red: 0.102, green: 0.451, blue: 0.910)
+
+    var body: some View {
+        VStack(spacing: 4) {
+            ZStack {
+                Circle()
+                    .fill(active ? gBlue : Color.gray.opacity(0.3))
+                    .frame(width: 32, height: 32)
+                Text("\(num)").font(.headline).foregroundColor(.white)
+            }
+            Text(label).font(.caption).foregroundColor(active ? gBlue : .secondary)
+        }
+    }
+}
+
+
+---
+./Frontend-iOS/AttendanceApp/AttendanceAppApp.swift
+---
+//
+//  AttendanceAppApp.swift
+//  AttendanceApp
+//
+//  Created by Sreehith Sanam on 17/03/26.
+//
+
+import SwiftUI
+
+@main
+struct AttendanceAppApp: App {
+    var body: some Scene {
+        WindowGroup {
+            ContentView()
+        }
+    }
+}
+
+
+---
+./Frontend-iOS/AttendanceApp/BLEScannerView.swift
+---
+import SwiftUI
+import CoreLocation
+import Combine
+
+// MARK: - iBeacon Scanner using CoreLocation
+class BLEScanner: NSObject, ObservableObject, CLLocationManagerDelegate {
+    private let beaconUUID = UUID(uuidString: "550e8400-e29b-41d4-a716-446655440000")!
+
+    @Published var status: BLEScanStatus = .idle
+    @Published var result: BLEResult? = nil
+    @Published var scanCountdown: Int = 3
+
+    private var locationManager = CLLocationManager()
+    private var rssiReadings: [Int] = []
+    private var foundMinor: Int? = nil
+    private var foundMajor: Int? = nil
+    private var countdownTimer: Timer? = nil
+
+    override init() {
+        super.init()
+        locationManager.delegate = self
+        locationManager.requestWhenInUseAuthorization()
+    }
+
+    func scan() {
+        rssiReadings = []
+        foundMinor = nil
+        foundMajor = nil
+        result = nil
+        scanCountdown = 3
+        status = .scanning
+
+        let constraint = CLBeaconIdentityConstraint(uuid: beaconUUID)
+        let region = CLBeaconRegion(beaconIdentityConstraint: constraint, identifier: "IITH-Beacon")
+        locationManager.startRangingBeacons(satisfying: constraint)
+
+        var tick = 3
+        countdownTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] t in
+            tick -= 1
+            self?.scanCountdown = tick
+            if tick <= 0 {
+                t.invalidate()
+                self?.finish(region: region)
+            }
+        }
+    }
+
+    func stop() {
+        let constraint = CLBeaconIdentityConstraint(uuid: beaconUUID)
+        locationManager.stopRangingBeacons(satisfying: constraint)
+        countdownTimer?.invalidate()
+    }
+
+    private func finish(region: CLBeaconRegion) {
+        locationManager.stopRangingBeacons(satisfying: region.beaconIdentityConstraint)
+        if rssiReadings.isEmpty {
+            status = .notFound
+        } else {
+            let mean = Double(rssiReadings.reduce(0, +)) / Double(rssiReadings.count)
+            result = BLEResult(minor: foundMinor ?? 0, major: foundMajor ?? 0, meanRSSI: mean)
+            // TODO: POST result (minor, major, meanRSSI) to backend
+            status = .found
+        }
+    }
+
+    // MARK: - CLLocationManagerDelegate
+    func locationManager(_ manager: CLLocationManager, didRange beacons: [CLBeacon],
+                         satisfying constraint: CLBeaconIdentityConstraint) {
+        for beacon in beacons where beacon.proximity != .unknown {
+            foundMajor = beacon.major.intValue
+            foundMinor = beacon.minor.intValue
+            rssiReadings.append(beacon.rssi)
+            print("Beacon: major=\(beacon.major) minor=\(beacon.minor) rssi=\(beacon.rssi) proximity=\(beacon.proximity.rawValue)")
+        }
+    }
+
+    func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        if manager.authorizationStatus == .denied { status = .unauthorized }
+    }
+}
+
+// MARK: - Models
+enum BLEScanStatus { case idle, scanning, found, notFound, unauthorized }
+struct BLEResult { let minor: Int; let major: Int; let meanRSSI: Double }
+
+// MARK: - Student BLE Scan View
+struct StudentBLEScanView: View {
+    var onSuccess: () -> Void
+    @StateObject private var scanner = BLEScanner()
+    @State private var timeLeft = 120
+    @State private var countdownTimer: Timer? = nil
+    @Environment(\.dismiss) var dismiss
+
+    private let purple = Color(red: 0.416, green: 0.353, blue: 0.804)
+
+    var body: some View {
+        VStack(spacing: 28) {
+            ZStack {
+                Circle().stroke(Color.gray.opacity(0.2), lineWidth: 8).frame(width: 110, height: 110)
+                Circle()
+                    .trim(from: 0, to: CGFloat(timeLeft) / 120)
+                    .stroke(purple, style: StrokeStyle(lineWidth: 8, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                    .frame(width: 110, height: 110)
+                    .animation(.linear(duration: 1), value: timeLeft)
+                Text(timeString).font(.title2).bold()
+            }
+            .padding(.top, 32)
+
+            Image(systemName: "antenna.radiowaves.left.and.right")
+                .font(.system(size: 64))
+                .foregroundColor(scanner.status == .scanning ? purple : Color.gray.opacity(0.4))
+                .symbolEffect(.pulse, isActive: scanner.status == .scanning)
+
+            Text(statusMessage)
+                .font(.subheadline).foregroundColor(.secondary)
+                .multilineTextAlignment(.center).padding(.horizontal)
+
+            if let r = scanner.result {
+                VStack(spacing: 10) {
+                    Text("Beacon Detected").font(.headline)
+                    Divider()
+                    HStack {
+                        statLabel("Major",     value: "\(r.major)")
+                        Spacer()
+                        statLabel("Minor",     value: "\(r.minor)")
+                        Spacer()
+                        statLabel("Mean RSSI", value: String(format: "%.1f dBm", r.meanRSSI))
+                    }
+                    .padding(.horizontal, 8)
+                    Text("TODO: send to backend").font(.caption).foregroundColor(.secondary)
+                }
+                .padding()
+                .background(Color.white)
+                .cornerRadius(14)
+                .shadow(color: Color.black.opacity(0.07), radius: 5, x: 0, y: 2)
+                .padding(.horizontal)
+            }
+
+            if scanner.status == .idle || scanner.status == .notFound {
+                Button(action: { scanner.scan() }) {
+                    Label("Scan for Beacon", systemImage: "dot.radiowaves.left.and.right")
+                        .font(.headline).foregroundColor(.white)
+                        .frame(maxWidth: .infinity).padding()
+                        .background(purple).cornerRadius(10)
+                }
+                .padding(.horizontal, 28)
+            }
+
+            if scanner.status == .found {
+                Button(action: { onSuccess(); dismiss() }) {
+                    Text("Continue to Face Verify")
+                        .font(.headline).foregroundColor(.white)
+                        .frame(maxWidth: .infinity).padding()
+                        .background(purple).cornerRadius(10)
+                }
+                .padding(.horizontal, 28)
+            }
+
+            Spacer()
+        }
+        .navigationTitle("BLE Scan")
+        .background(Color.gray.opacity(0.07).ignoresSafeArea())
+        .onAppear {
+            countdownTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
+                if timeLeft > 0 { timeLeft -= 1 } else { scanner.stop(); countdownTimer?.invalidate() }
+            }
+        }
+        .onDisappear { scanner.stop(); countdownTimer?.invalidate() }
+    }
+
+    private var timeString: String { String(format: "%d:%02d", timeLeft / 60, timeLeft % 60) }
+
+    private var statusMessage: String {
+        switch scanner.status {
+        case .idle:         return "Tap Scan to search for the classroom beacon"
+        case .scanning:     return "Scanning... \(scanner.scanCountdown)"
+        case .found:        return "Beacon found!"
+        case .notFound:     return "Beacon not found. Try again."
+        case .unauthorized: return "Location permission denied. Enable in Settings."
+        }
+    }
+
+    private func statLabel(_ title: String, value: String) -> some View {
+        VStack(spacing: 4) {
+            Text(title).font(.caption).foregroundColor(.secondary)
+            Text(value).font(.headline).bold()
+        }
+    }
+}
+
+
+---
+./Frontend-iOS/AttendanceApp/ContentView.swift
+---
+import SwiftUI
+
+enum UserRole { case student, professor, admin }
+
+struct ContentView: View {
+    @State private var isLoggedIn = false
+    @State private var role: UserRole = .student
+
+    var body: some View {
+        Group {
+            if isLoggedIn {
+                switch role {
+                case .student:   StudentTabView(isLoggedIn: $isLoggedIn)
+                case .professor: ProfessorTabView(isLoggedIn: $isLoggedIn)
+                case .admin:     ProfessorTabView(isLoggedIn: $isLoggedIn) // same for now
+                }
+            } else {
+                RoleSelectionView(isLoggedIn: $isLoggedIn, role: $role)
+            }
+        }
+        .preferredColorScheme(.light)
+    }
+}
+
+
+---
+./Frontend-iOS/AttendanceApp/DashboardView.swift
+---
+import SwiftUI
+
+// MARK: - Model
+struct Subject: Identifiable {
+    let id = UUID()
+    let name: String
+    let code: String
+    let bannerColor: Color
+    var attended: Int
+    var total: Int
+    var percentage: Double { total > 0 ? Double(attended) / Double(total) * 100 : 0 }
+}
+
+// MARK: - DashboardView
+struct DashboardView: View {
+    @State private var subjects: [Subject] = [
+        Subject(name: "Swift App Dev",    code: "CS5.401", bannerColor: Color(red: 0.102, green: 0.451, blue: 0.910), attended: 10, total: 10),
+        Subject(name: "Machine Learning", code: "CS5.301", bannerColor: Color(red: 0.204, green: 0.659, blue: 0.325), attended: 18, total: 20),
+        Subject(name: "Backend Dev",      code: "CS5.501", bannerColor: Color(red: 0.984, green: 0.467, blue: 0.094), attended: 15, total: 20),
+    ]
+
+    private var overall: Double {
+        let a = subjects.reduce(0) { $0 + $1.attended }
+        let t = subjects.reduce(0) { $0 + $1.total }
+        return t > 0 ? Double(a) / Double(t) * 100 : 0
+    }
+
+    var body: some View {
+        NavigationView {
+            ScrollView {
+                VStack(spacing: 16) {
+                    // Overall card
+                    VStack(spacing: 6) {
+                        Text("Overall Attendance")
+                            .font(.subheadline).foregroundColor(.secondary)
+                        Text(String(format: "%.1f%%", overall))
+                            .font(.system(size: 56, weight: .bold))
+                            .foregroundColor(overall >= 75 ? Color(red: 0.204, green: 0.659, blue: 0.325) : .red)
+                        ProgressView(value: overall, total: 100)
+                            .progressViewStyle(LinearProgressViewStyle(
+                                tint: overall >= 75 ? Color(red: 0.204, green: 0.659, blue: 0.325) : .red))
+                            .padding(.horizontal, 32)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 24)
+                    .background(Color.white)
+                    .cornerRadius(15)
+                    .shadow(color: Color.black.opacity(0.08), radius: 5, x: 0, y: 2)
+                    .padding(.horizontal)
+
+                    ForEach(subjects) { subject in
+                        SubjectCard(subject: subject)
+                    }
+                }
+                .padding(.vertical)
+            }
+            .background(Color.gray.opacity(0.1))
+            .navigationTitle("Analytics")
+        }
+    }
+}
+
+// MARK: - SubjectCard
+struct SubjectCard: View {
+    let subject: Subject
+
+    private var statusColor: Color {
+        subject.percentage >= 75 ? Color(red: 0.204, green: 0.659, blue: 0.325)
+            : subject.percentage >= 60 ? Color(red: 0.984, green: 0.467, blue: 0.094)
+            : .red
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ZStack(alignment: .bottomLeading) {
+                subject.bannerColor.frame(height: 60)
+                Text(subject.name)
+                    .font(.headline).bold().foregroundColor(.white)
+                    .padding([.leading, .bottom], 12)
+            }
+            .clipShape(CornerShape(radius: 15, corners: [.topLeft, .topRight]))
+
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(subject.code).font(.caption).foregroundColor(.secondary)
+                    ProgressView(value: subject.percentage, total: 100)
+                        .progressViewStyle(LinearProgressViewStyle(tint: statusColor))
+                        .frame(width: 160)
+                }
+                Spacer()
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text(String(format: "%.0f%%", subject.percentage))
+                        .font(.title2).bold().foregroundColor(statusColor)
+                    Text("\(subject.attended)/\(subject.total) classes")
+                        .font(.caption).foregroundColor(.secondary)
+                }
+            }
+            .padding(14)
+            .background(Color.white)
+            .clipShape(CornerShape(radius: 15, corners: [.bottomLeft, .bottomRight]))
+        }
+        .shadow(color: Color.black.opacity(0.08), radius: 5, x: 0, y: 2)
+        .padding(.horizontal)
+    }
+}
+
+
+---
+./Frontend-iOS/AttendanceApp/FaceCaptureView.swift
+---
+import SwiftUI
+import AVFoundation
+
+// MARK: - Face Capture (front camera)
+
+struct FaceCaptureView: UIViewControllerRepresentable {
+    var onCaptured: (UIImage) -> Void
+
+    func makeUIViewController(context: Context) -> FaceCaptureVC {
+        let vc = FaceCaptureVC()
+        vc.onCaptured = onCaptured
+        return vc
+    }
+    func updateUIViewController(_ uiViewController: FaceCaptureVC, context: Context) {}
+}
+
+class FaceCaptureVC: UIViewController {
+    var onCaptured: ((UIImage) -> Void)?
+    private var session = AVCaptureSession()
+    private var photoOutput = AVCapturePhotoOutput()
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .black
+        guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front),
+              let input = try? AVCaptureDeviceInput(device: device),
+              session.canAddInput(input),
+              session.canAddOutput(photoOutput) else { return }
+
+        session.addInput(input)
+        session.addOutput(photoOutput)
+
+        let preview = AVCaptureVideoPreviewLayer(session: session)
+        preview.frame = view.bounds
+        preview.videoGravity = .resizeAspectFill
+        view.layer.addSublayer(preview)
+
+        // Capture button
+        let btn = UIButton(type: .system)
+        btn.setTitle("Capture", for: .normal)
+        btn.titleLabel?.font = .boldSystemFont(ofSize: 18)
+        btn.setTitleColor(.white, for: .normal)
+        btn.backgroundColor = UIColor(red: 0.102, green: 0.451, blue: 0.910, alpha: 1)
+        btn.layer.cornerRadius = 30
+        btn.frame = CGRect(x: view.bounds.midX - 70, y: view.bounds.maxY - 100, width: 140, height: 60)
+        btn.addTarget(self, action: #selector(capture), for: .touchUpInside)
+        view.addSubview(btn)
+
+        DispatchQueue.global(qos: .userInitiated).async { self.session.startRunning() }
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        session.stopRunning()
+    }
+
+    @objc private func capture() {
+        let settings = AVCapturePhotoSettings()
+        photoOutput.capturePhoto(with: settings, delegate: self)
+    }
+}
+
+extension FaceCaptureVC: AVCapturePhotoCaptureDelegate {
+    func photoOutput(_ output: AVCapturePhotoOutput,
+                     didFinishProcessingPhoto photo: AVCapturePhoto,
+                     error: Error?) {
+        guard let data = photo.fileDataRepresentation(),
+              let image = UIImage(data: data) else { return }
+        session.stopRunning()
+        onCaptured?(image)
+    }
+}
+
+// MARK: - Face Verify Screen (student)
+
+struct StudentFaceVerifyView: View {
+    var onSuccess: () -> Void
+    @State private var captured = false
+    @State private var capturedImage: UIImage? = nil
+    @Environment(\.dismiss) var dismiss
+
+    var body: some View {
+        ZStack {
+            if !captured {
+                FaceCaptureView { image in
+                    capturedImage = image
+                    captured = true
+                }
+                .ignoresSafeArea()
+
+                VStack {
+                    Spacer()
+                    Text("Look straight at the camera and tap Capture")
+                        .font(.subheadline).foregroundColor(.white)
+                        .multilineTextAlignment(.center)
+                        .padding(10)
+                        .background(Color.black.opacity(0.5))
+                        .cornerRadius(8)
+                        .padding(.bottom, 120)
+                }
+            } else {
+                VStack(spacing: 20) {
+                    if let img = capturedImage {
+                        Image(uiImage: img)
+                            .resizable().scaledToFill()
+                            .frame(width: 160, height: 160)
+                            .clipShape(Circle())
+                            .overlay(Circle().stroke(Color(red: 0.204, green: 0.659, blue: 0.325), lineWidth: 3))
+                    }
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 48))
+                        .foregroundColor(Color(red: 0.204, green: 0.659, blue: 0.325))
+                    Text("Face Captured!")
+                        .font(.title2).bold()
+                    Text("Sending for verification...")
+                        .font(.subheadline).foregroundColor(.secondary)
+                    // TODO: POST capturedImage to backend for face verification
+                    Button(action: { onSuccess(); dismiss() }) {
+                        Text("Done")
+                            .font(.headline).foregroundColor(.white)
+                            .frame(maxWidth: .infinity).padding()
+                            .background(Color(red: 0.204, green: 0.659, blue: 0.325))
+                            .cornerRadius(10)
+                    }
+                    .padding(.horizontal, 28)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color.gray.opacity(0.07))
+            }
+        }
+        .navigationTitle("Face Verify")
+    }
+}
+
+
+---
+./Frontend-iOS/AttendanceApp/Helpers.swift
+---
+import SwiftUI
+
+struct CornerShape: Shape {
+    var radius: CGFloat
+    var corners: [Corner]
+    enum Corner { case topLeft, topRight, bottomLeft, bottomRight }
+
+    func path(in rect: CGRect) -> Path {
+        var p = Path()
+        let r = radius
+        let tl = corners.contains(.topLeft),  tr = corners.contains(.topRight)
+        let bl = corners.contains(.bottomLeft), br = corners.contains(.bottomRight)
+        p.move(to: CGPoint(x: rect.minX + (tl ? r : 0), y: rect.minY))
+        p.addLine(to: CGPoint(x: rect.maxX - (tr ? r : 0), y: rect.minY))
+        if tr { p.addArc(center: CGPoint(x: rect.maxX-r, y: rect.minY+r), radius: r, startAngle: .degrees(-90), endAngle: .degrees(0), clockwise: false) }
+        p.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY - (br ? r : 0)))
+        if br { p.addArc(center: CGPoint(x: rect.maxX-r, y: rect.maxY-r), radius: r, startAngle: .degrees(0), endAngle: .degrees(90), clockwise: false) }
+        p.addLine(to: CGPoint(x: rect.minX + (bl ? r : 0), y: rect.maxY))
+        if bl { p.addArc(center: CGPoint(x: rect.minX+r, y: rect.maxY-r), radius: r, startAngle: .degrees(90), endAngle: .degrees(180), clockwise: false) }
+        p.addLine(to: CGPoint(x: rect.minX, y: rect.minY + (tl ? r : 0)))
+        if tl { p.addArc(center: CGPoint(x: rect.minX+r, y: rect.minY+r), radius: r, startAngle: .degrees(180), endAngle: .degrees(270), clockwise: false) }
+        p.closeSubpath()
+        return p
+    }
+}
+
+
+---
+./Frontend-iOS/AttendanceApp/Info.plist
+---
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSCameraUsageDescription</key>
+	<string>Used to scan QR codes and verify your face for attendance</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Used to detect classroom BLE beacons for attendance</string>
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>Used to detect classroom BLE beacons for attendance</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Used to range iBeacons for classroom attendance detection</string>
+	<key>NSServices</key>
+	<array>
+		<dict/>
+	</array>
+</dict>
+</plist>
+
+
+---
+./Frontend-iOS/AttendanceApp/LoginView.swift
+---
+import SwiftUI
+
+struct LoginView: View {
+    @Binding var isLoggedIn: Bool
+    @Binding var role: UserRole
+    let selectedRole: UserRole
+
+    @State private var email = ""
+    @State private var password = ""
+
+    private let gBlue = Color(red: 0.102, green: 0.451, blue: 0.910)
+
+    var roleLabel: String {
+        switch selectedRole {
+        case .student:   return "Student"
+        case .professor: return "Professor"
+        case .admin:     return "Admin"
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 32) {
+            Spacer()
+            VStack(spacing: 8) {
+                Image("iithlogo")
+                    .resizable().scaledToFit()
+                    .frame(width: 80, height: 80)
+                Text("Sign In as \(roleLabel)")
+                    .font(.title2).bold()
+            }
+
+            VStack(spacing: 14) {
+                TextField("Email", text: $email)
+                    .padding()
+                    .background(Color.gray.opacity(0.12))
+                    .cornerRadius(10)
+
+                SecureField("Password", text: $password)
+                    .padding()
+                    .background(Color.gray.opacity(0.12))
+                    .cornerRadius(10)
+
+                Button(action: {
+                    role = selectedRole
+                    isLoggedIn = true
+                }) {
+                    Text("Sign In")
+                        .font(.headline).foregroundColor(.white)
+                        .frame(maxWidth: .infinity).padding()
+                        .background(gBlue)
+                        .cornerRadius(10)
+                }
+                .padding(.top, 4)
+            }
+            .padding(.horizontal, 28)
+
+            Spacer()
+        }
+        .background(Color.gray.opacity(0.07).ignoresSafeArea())
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+
+---
+./Frontend-iOS/AttendanceApp/MainTabView.swift
+---
+import SwiftUI
+
+// MARK: - Shared profile overlay used by both tab views
+struct ProfileToolbarButton: View {
+    @Binding var showProfile: Bool
+    var body: some View {
+        Button(action: { showProfile = true }) {
+            Image(systemName: "person.crop.circle.fill")
+                .font(.system(size: 26))
+                .foregroundColor(Color(red: 0.102, green: 0.451, blue: 0.910))
+        }
+    }
+}
+
+struct ProfileSheet: View {
+    @Binding var isLoggedIn: Bool
+    @Binding var showProfile: Bool
+
+    // TODO: replace with real user from backend
+    let name  = "Sreehith Sanam"
+    let email = "sreehith@iith.ac.in"
+    let id    = "CS22BTECH11050"
+
+    var body: some View {
+        VStack(spacing: 24) {
+            Image(systemName: "person.crop.circle.fill")
+                .font(.system(size: 80))
+                .foregroundColor(Color(red: 0.102, green: 0.451, blue: 0.910))
+                .padding(.top, 40)
+
+            VStack(spacing: 6) {
+                Text(name).font(.title2).bold()
+                Text(email).font(.subheadline).foregroundColor(.secondary)
+                Text(id).font(.subheadline).foregroundColor(.secondary)
+            }
+
+            Divider().padding(.horizontal)
+
+            VStack(spacing: 12) {
+                Button(action: {
+                    showProfile = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { isLoggedIn = false }
+                }) {
+                    Label("Log Out", systemImage: "rectangle.portrait.and.arrow.right")
+                        .font(.headline).foregroundColor(.red)
+                        .frame(maxWidth: .infinity).padding()
+                        .background(Color.red.opacity(0.1))
+                        .cornerRadius(12)
+                }
+                Button(action: { showProfile = false }) {
+                    Text("Close").font(.subheadline).foregroundColor(.secondary)
+                }
+            }
+            .padding(.horizontal, 28)
+            Spacer()
+        }
+    }
+}
+
+// MARK: - Student Tab
+struct StudentTabView: View {
+    @Binding var isLoggedIn: Bool
+    @State private var showProfile = false
+
+    var body: some View {
+        TabView {
+            DashboardView()
+                .tabItem { Label("Dashboard", systemImage: "chart.bar.fill") }
+            StudentSessionsView()
+                .tabItem { Label("Active Sessions", systemImage: "clock.fill") }
+        }
+        .accentColor(Color(red: 0.102, green: 0.451, blue: 0.910))
+        .overlay(alignment: .topTrailing) {
+            ProfileToolbarButton(showProfile: $showProfile)
+                .padding(.trailing, 16)
+                .padding(.top, 8)
+        }
+        .sheet(isPresented: $showProfile) {
+            ProfileSheet(isLoggedIn: $isLoggedIn, showProfile: $showProfile)
+        }
+    }
+}
+
+// MARK: - Professor Tab
+struct ProfessorTabView: View {
+    @Binding var isLoggedIn: Bool
+    @State private var showProfile = false
+
+    var body: some View {
+        TabView {
+            ProfessorScheduleView()
+                .tabItem { Label("Schedule", systemImage: "calendar") }
+            ProfessorSessionView()
+                .tabItem { Label("Courses", systemImage: "book.fill") }
+            ProfessorAnalyticsView()
+                .tabItem { Label("Analytics", systemImage: "chart.bar.fill") }
+        }
+        .accentColor(Color(red: 0.102, green: 0.451, blue: 0.910))
+        .overlay(alignment: .topTrailing) {
+            ProfileToolbarButton(showProfile: $showProfile)
+                .padding(.trailing, 16)
+                .padding(.top, 8)
+        }
+        .sheet(isPresented: $showProfile) {
+            ProfileSheet(isLoggedIn: $isLoggedIn, showProfile: $showProfile)
+        }
+    }
+}
+
+
+---
+./Frontend-iOS/AttendanceApp/ProfessorView.swift
+---
+import SwiftUI
+
+// MARK: - Models
+
+struct ScheduledClass: Identifiable {
+    let id = UUID()
+    let name: String
+    let code: String
+    let room: String
+    let timing: String
+    let days: [String]        // e.g. ["Mon", "Wed", "Fri"]
+    let bannerColor: Color
+}
+
+struct AttendanceSchedule: Identifiable {
+    let id = UUID()
+    var label: String        // e.g. "15 min after start"
+    var time: String         // e.g. "10:15 AM"
+    var mode: ProfMode
+    var isEnabled: Bool
+}
+
+enum ProfMode: String {
+    case qr = "QR Code"
+    case ble = "BLE"
+    case manual = "Manual"
+    var icon: String {
+        switch self {
+        case .qr:     return "qrcode.viewfinder"
+        case .ble:    return "antenna.radiowaves.left.and.right"
+        case .manual: return "list.clipboard.fill"
+        }
+    }
+    var color: Color {
+        switch self {
+        case .qr:     return Color(red: 0.102, green: 0.451, blue: 0.910)
+        case .ble:    return Color(red: 0.416, green: 0.353, blue: 0.804)
+        case .manual: return Color(red: 0.984, green: 0.467, blue: 0.094)
+        }
+    }
+}
+
+// MARK: - Professor Schedule List
+
+struct ProfessorScheduleView: View {
+    let classes: [ScheduledClass] = [
+        ScheduledClass(name: "Swift App Dev",    code: "CS5.401", room: "Room 304", timing: "10:00 – 11:00 AM", days: ["Mon", "Wed", "Fri"], bannerColor: Color(red: 0.102, green: 0.451, blue: 0.910)),
+        ScheduledClass(name: "Machine Learning", code: "CS5.301", room: "Room 101", timing: "11:30 – 12:30 PM", days: ["Tue", "Thu"],         bannerColor: Color(red: 0.204, green: 0.659, blue: 0.325)),
+        ScheduledClass(name: "Backend Dev",      code: "CS5.501", room: "Room 202", timing: "02:00 – 03:00 PM", days: ["Mon", "Thu"],         bannerColor: Color(red: 0.984, green: 0.467, blue: 0.094)),
+    ]
+
+    var body: some View {
+        NavigationView {
+            ScrollView {
+                VStack(spacing: 16) {
+                    ForEach(classes) { cls in
+                        NavigationLink(destination: ClassDetailView(cls: cls)) {
+                            ScheduleCard(cls: cls)
+                        }
+                        .buttonStyle(PlainButtonStyle())
+                    }
+                }
+                .padding(.vertical)
+            }
+            .background(Color.gray.opacity(0.1))
+            .navigationTitle("My Schedule")
+        }
+    }
+}
+
+struct ScheduleCard: View {
+    let cls: ScheduledClass
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ZStack(alignment: .bottomLeading) {
+                cls.bannerColor.frame(height: 56)
+                Text(cls.name)
+                    .font(.headline).bold().foregroundColor(.white)
+                    .padding([.leading, .bottom], 12)
+            }
+            .clipShape(CornerShape(radius: 15, corners: [.topLeft, .topRight]))
+
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(cls.code).font(.caption).foregroundColor(.secondary)
+                    Label(cls.timing, systemImage: "clock").font(.caption).foregroundColor(.secondary)
+                    // Days chips
+                    HStack(spacing: 4) {
+                        ForEach(cls.days, id: \.self) { day in
+                            Text(day)
+                                .font(.system(size: 10, weight: .semibold))
+                                .padding(.horizontal, 6).padding(.vertical, 2)
+                                .background(cls.bannerColor.opacity(0.15))
+                                .foregroundColor(cls.bannerColor)
+                                .cornerRadius(4)
+                        }
+                    }
+                }
+                Spacer()
+                Label(cls.room, systemImage: "mappin").font(.caption).foregroundColor(.secondary)
+            }
+            .padding(14)
+            .background(Color.white)
+            .clipShape(CornerShape(radius: 15, corners: [.bottomLeft, .bottomRight]))
+        }
+        .shadow(color: Color.black.opacity(0.08), radius: 5, x: 0, y: 2)
+        .padding(.horizontal)
+    }
+}
+
+// MARK: - Class Detail (Start Session + Schedules)
+
+struct ClassDetailView: View {
+    let cls: ScheduledClass
+    @State private var schedules: [AttendanceSchedule] = [
+        AttendanceSchedule(label: "15 min after start", time: "10:15 AM", mode: .qr,  isEnabled: true),
+        AttendanceSchedule(label: "15 min before end",  time: "10:45 AM", mode: .ble, isEnabled: false),
+    ]
+    @State private var showAddSchedule = false
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 20) {
+                // Class info card
+                VStack(alignment: .leading, spacing: 0) {
+                    ZStack(alignment: .bottomLeading) {
+                        cls.bannerColor.frame(height: 56)
+                        Text(cls.name)
+                            .font(.headline).bold().foregroundColor(.white)
+                            .padding([.leading, .bottom], 12)
+                    }
+                    .clipShape(CornerShape(radius: 15, corners: [.topLeft, .topRight]))
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("\(cls.code)  •  \(cls.room)").font(.subheadline).foregroundColor(.secondary)
+                        Label(cls.timing, systemImage: "clock").font(.caption).foregroundColor(.secondary)
+                    }
+                    .padding(14)
+                    .background(Color.white)
+                    .clipShape(CornerShape(radius: 15, corners: [.bottomLeft, .bottomRight]))
+                }
+                .shadow(color: Color.black.opacity(0.08), radius: 5, x: 0, y: 2)
+                .padding(.horizontal)
+
+                // Start Session
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Start Attendance Now")
+                        .font(.headline).padding(.horizontal)
+                    HStack(spacing: 10) {
+                        ForEach([ProfMode.qr, .ble, .manual], id: \.self) { mode in
+                            NavigationLink(destination: destinationView(for: mode)) {
+                                VStack(spacing: 6) {
+                                    Image(systemName: mode.icon).font(.system(size: 22))
+                                    Text(mode.rawValue).font(.caption).fontWeight(.semibold)
+                                }
+                                .frame(maxWidth: .infinity).padding(.vertical, 12)
+                                .background(mode.color.opacity(0.12))
+                                .foregroundColor(mode.color)
+                                .cornerRadius(12)
+                            }
+                        }
+                    }
+                    .padding(.horizontal)
+                }
+
+                // Scheduled Attendances
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Text("Scheduled Attendances")
+                            .font(.headline)
+                        Spacer()
+                        Button(action: { showAddSchedule = true }) {
+                            Image(systemName: "plus.circle.fill")
+                                .font(.title3)
+                                .foregroundColor(Color(red: 0.102, green: 0.451, blue: 0.910))
+                        }
+                    }
+                    .padding(.horizontal)
+
+                    // Fixed-height scrollable schedule list showing ~3 items
+                    ScrollView {
+                        VStack(spacing: 0) {
+                            ForEach($schedules) { $schedule in
+                                ScheduleRow(schedule: $schedule)
+                                Divider().padding(.horizontal)
+                            }
+                        }
+                        .background(Color.white)
+                        .cornerRadius(15)
+                        .shadow(color: Color.black.opacity(0.08), radius: 5, x: 0, y: 2)
+                    }
+                    .frame(height: CGFloat(min(schedules.count, 3)) * 72)
+                    .padding(.horizontal)
+                }
+            }
+            .padding(.vertical)
+        }
+        .background(Color.gray.opacity(0.1))
+        .navigationTitle(cls.name)
+        .sheet(isPresented: $showAddSchedule) {
+            AddScheduleSheet { newSchedule in
+                schedules.append(newSchedule)
+            }
+        }
+    }
+
+    @ViewBuilder
+    func destinationView(for mode: ProfMode) -> some View {
+        switch mode {
+        case .qr:     ProfQRSessionView(cls: cls)
+        case .ble:    ProfBLESessionView(cls: cls)
+        case .manual: ProfManualSessionView(cls: cls)
+        }
+    }
+}
+
+struct ScheduleRow: View {
+    @Binding var schedule: AttendanceSchedule
+    var body: some View {
+        HStack(spacing: 14) {
+            Image(systemName: "alarm.fill")
+                .foregroundColor(schedule.mode.color)
+                .frame(width: 32)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(schedule.label).font(.subheadline).fontWeight(.medium)
+                HStack(spacing: 6) {
+                    Text(schedule.time).font(.caption).foregroundColor(.secondary)
+                    Text("•").foregroundColor(.secondary)
+                    Text(schedule.mode.rawValue).font(.caption).foregroundColor(schedule.mode.color)
+                }
+            }
+            Spacer()
+            Toggle("", isOn: $schedule.isEnabled)
+                .labelsHidden()
+                .tint(Color(red: 0.102, green: 0.451, blue: 0.910))
+        }
+        .padding(.horizontal, 14).padding(.vertical, 12)
+    }
+}
+
+// MARK: - Add Schedule Sheet
+
+struct AddScheduleSheet: View {
+    var onAdd: (AttendanceSchedule) -> Void
+    @Environment(\.dismiss) var dismiss
+    @State private var label = ""
+    @State private var time = Date()
+    @State private var mode: ProfMode = .qr
+
+    var body: some View {
+        NavigationView {
+            Form {
+                Section("Label") {
+                    TextField("e.g. 15 min after start", text: $label)
+                }
+                Section("Time") {
+                    DatePicker("Time", selection: $time, displayedComponents: .hourAndMinute)
+                        .labelsHidden()
+                }
+                Section("Mode") {
+                    Picker("Mode", selection: $mode) {
+                        Text("QR Code").tag(ProfMode.qr)
+                        Text("BLE").tag(ProfMode.ble)
+                    }
+                    .pickerStyle(.segmented)
+                }
+            }
+            .navigationTitle("Add Schedule")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Add") {
+                        let formatter = DateFormatter()
+                        formatter.timeStyle = .short
+                        onAdd(AttendanceSchedule(label: label.isEmpty ? "Scheduled" : label,
+                                                 time: formatter.string(from: time),
+                                                 mode: mode, isEnabled: true))
+                        dismiss()
+                    }
+                }
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - QR Session View
+
+struct ProfQRSessionView: View {
+    let cls: ScheduledClass
+    @State private var timeLeft = 120
+    @State private var qrImage = "qrcode"   // TODO: replace with fetched QR from backend
+    @State private var timer: Timer? = nil
+    @State private var qrRefreshTimer: Timer? = nil
+
+    var body: some View {
+        VStack(spacing: 24) {
+            // Timer ring
+            ZStack {
+                Circle()
+                    .stroke(Color.gray.opacity(0.2), lineWidth: 8)
+                    .frame(width: 100, height: 100)
+                Circle()
+                    .trim(from: 0, to: CGFloat(timeLeft) / 120)
+                    .stroke(Color(red: 0.102, green: 0.451, blue: 0.910), style: StrokeStyle(lineWidth: 8, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                    .frame(width: 100, height: 100)
+                    .animation(.linear(duration: 1), value: timeLeft)
+                Text(timeString).font(.title2).bold()
+            }
+            .padding(.top, 32)
+
+            Text("QR refreshes every 3–5 seconds")
+                .font(.caption).foregroundColor(.secondary)
+
+            // QR placeholder (swap Image(systemName:) with actual QR image from backend)
+            Image(systemName: qrImage)
+                .resizable().scaledToFit()
+                .frame(width: 200, height: 200)
+                .padding(16)
+                .background(Color.white)
+                .cornerRadius(16)
+                .shadow(color: Color.black.opacity(0.08), radius: 6, x: 0, y: 2)
+
+            Text("Display this to students")
+                .font(.subheadline).foregroundColor(.secondary)
+
+            Spacer()
+        }
+        .navigationTitle("QR Attendance")
+        .background(Color.gray.opacity(0.07).ignoresSafeArea())
+        .onAppear { startTimers() }
+        .onDisappear { stopTimers() }
+    }
+
+    private var timeString: String {
+        String(format: "%d:%02d", timeLeft / 60, timeLeft % 60)
+    }
+
+    private func startTimers() {
+        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
+            if timeLeft > 0 { timeLeft -= 1 } else { stopTimers() }
+        }
+        qrRefreshTimer = Timer.scheduledTimer(withTimeInterval: 4, repeats: true) { _ in
+            // TODO: fetch new QR from backend here
+            qrImage = qrImage == "qrcode" ? "qrcode.viewfinder" : "qrcode"
+        }
+    }
+
+    private func stopTimers() {
+        timer?.invalidate(); qrRefreshTimer?.invalidate()
+    }
+}
+
+// MARK: - BLE Session View
+
+struct ProfBLESessionView: View {
+    let cls: ScheduledClass
+    @State private var timeLeft = 120
+    @State private var timer: Timer? = nil
+
+    var body: some View {
+        VStack(spacing: 24) {
+            ZStack {
+                Circle()
+                    .stroke(Color.gray.opacity(0.2), lineWidth: 8)
+                    .frame(width: 100, height: 100)
+                Circle()
+                    .trim(from: 0, to: CGFloat(timeLeft) / 120)
+                    .stroke(Color(red: 0.416, green: 0.353, blue: 0.804), style: StrokeStyle(lineWidth: 8, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                    .frame(width: 100, height: 100)
+                    .animation(.linear(duration: 1), value: timeLeft)
+                Text(timeString).font(.title2).bold()
+            }
+            .padding(.top, 32)
+
+            Image(systemName: "antenna.radiowaves.left.and.right")
+                .font(.system(size: 80))
+                .foregroundColor(Color(red: 0.416, green: 0.353, blue: 0.804))
+                .symbolEffect(.pulse)
+
+            Text("BLE beacon is active\nStudents will be detected automatically")
+                .font(.subheadline).foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+
+            Spacer()
+        }
+        .navigationTitle("BLE Attendance")
+        .background(Color.gray.opacity(0.07).ignoresSafeArea())
+        .onAppear {
+            timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
+                if timeLeft > 0 { timeLeft -= 1 } else { timer?.invalidate() }
+            }
+        }
+        .onDisappear { timer?.invalidate() }
+    }
+
+    private var timeString: String {
+        String(format: "%d:%02d", timeLeft / 60, timeLeft % 60)
+    }
+}
+
+// MARK: - Manual Session View
+
+struct ProfManualSessionView: View {
+    let cls: ScheduledClass
+    // TODO: fetch from backend
+    @State private var students: [(name: String, roll: String, present: Bool)] = [
+        ("Sreehith Sanam",  "CS22BTECH11050", false),
+        ("Arjun Reddy",     "CS22BTECH11023", false),
+        ("Priya Sharma",    "CS22BTECH11031", false),
+        ("Kiran Kumar",     "CS22BTECH11044", false),
+        ("Ananya Singh",    "CS22BTECH11012", false),
+        ("Rahul Verma",     "CS22BTECH11067", false),
+    ]
+
+    private let gBlue = Color(red: 0.102, green: 0.451, blue: 0.910)
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Summary bar
+            HStack {
+                Text("\(students.filter { $0.present }.count) / \(students.count) present")
+                    .font(.subheadline).bold()
+                Spacer()
+                Button("Mark All") {
+                    for i in students.indices { students[i].present = true }
+                }
+                .font(.subheadline).foregroundColor(gBlue)
+            }
+            .padding(.horizontal, 16).padding(.vertical, 10)
+            .background(Color.white)
+            .shadow(color: Color.black.opacity(0.05), radius: 3, x: 0, y: 1)
+
+            List {
+                ForEach(students.indices, id: \.self) { i in
+                    HStack(spacing: 14) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(students[i].name).font(.subheadline).fontWeight(.medium)
+                            Text(students[i].roll).font(.caption).foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        Button(action: { students[i].present.toggle() }) {
+                            Image(systemName: students[i].present ? "checkmark.circle.fill" : "circle")
+                                .font(.title2)
+                                .foregroundColor(students[i].present ? Color(red: 0.204, green: 0.659, blue: 0.325) : .gray)
+                        }
+                        .buttonStyle(PlainButtonStyle())
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+            .listStyle(.plain)
+
+            Button(action: { /* TODO: POST attendance to backend */ }) {
+                Text("Submit Attendance")
+                    .font(.headline).foregroundColor(.white)
+                    .frame(maxWidth: .infinity).padding()
+                    .background(gBlue).cornerRadius(10)
+            }
+            .padding(16)
+            .background(Color.white)
+        }
+        .navigationTitle("Manual Attendance")
+        .background(Color.gray.opacity(0.07).ignoresSafeArea())
+    }
+}
+
+// MARK: - Professor Session Tab (quick-start without picking a class)
+struct ProfessorSessionView: View {
+    // Today's classes — TODO: filter from backend by current day
+    let todayClasses: [ScheduledClass] = [
+        ScheduledClass(name: "Swift App Dev",    code: "CS5.401", room: "Room 304", timing: "10:00 – 11:00 AM", days: ["Mon", "Wed", "Fri"], bannerColor: Color(red: 0.102, green: 0.451, blue: 0.910)),
+        ScheduledClass(name: "Backend Dev",      code: "CS5.501", room: "Room 202", timing: "02:00 – 03:00 PM", days: ["Mon", "Thu"],         bannerColor: Color(red: 0.984, green: 0.467, blue: 0.094)),
+    ]
+
+    var body: some View {
+        NavigationView {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("Today's Classes")
+                        .font(.subheadline).foregroundColor(.secondary)
+                        .padding(.horizontal)
+
+                    ForEach(todayClasses) { cls in
+                        NavigationLink(destination: ClassDetailView(cls: cls)) {
+                            ScheduleCard(cls: cls)
+                        }
+                        .buttonStyle(PlainButtonStyle())
+                    }
+                }
+                .padding(.vertical)
+            }
+            .background(Color.gray.opacity(0.1))
+            .navigationTitle("Session")
+        }
+    }
+}
+
+// MARK: - Professor Analytics
+
+struct StudentRecord: Identifiable {
+    let id = UUID()
+    let name: String
+    let roll: String
+    let attended: Int
+    let total: Int
+    var percentage: Double { total > 0 ? Double(attended) / Double(total) * 100 : 0 }
+}
+
+struct CourseAnalytics: Identifiable {
+    let id = UUID()
+    let cls: ScheduledClass
+    let students: [StudentRecord]
+    var overallPercentage: Double {
+        guard !students.isEmpty else { return 0 }
+        return students.reduce(0) { $0 + $1.percentage } / Double(students.count)
+    }
+}
+
+struct ProfessorAnalyticsView: View {
+    // TODO: fetch from backend
+    let courses: [CourseAnalytics] = [
+        CourseAnalytics(cls: ScheduledClass(name: "Swift App Dev", code: "CS5.401", room: "Room 304", timing: "10:00 – 11:00 AM", days: ["Mon","Wed","Fri"], bannerColor: Color(red: 0.102, green: 0.451, blue: 0.910)),
+            students: [
+                StudentRecord(name: "Sreehith Sanam", roll: "CS22BTECH11050", attended: 9,  total: 10),
+                StudentRecord(name: "Arjun Reddy",    roll: "CS22BTECH11023", attended: 7,  total: 10),
+                StudentRecord(name: "Priya Sharma",   roll: "CS22BTECH11031", attended: 10, total: 10),
+                StudentRecord(name: "Kiran Kumar",    roll: "CS22BTECH11044", attended: 6,  total: 10),
+            ]),
+        CourseAnalytics(cls: ScheduledClass(name: "Machine Learning", code: "CS5.301", room: "Room 101", timing: "11:30 – 12:30 PM", days: ["Tue","Thu"], bannerColor: Color(red: 0.204, green: 0.659, blue: 0.325)),
+            students: [
+                StudentRecord(name: "Sreehith Sanam", roll: "CS22BTECH11050", attended: 18, total: 20),
+                StudentRecord(name: "Arjun Reddy",    roll: "CS22BTECH11023", attended: 14, total: 20),
+                StudentRecord(name: "Priya Sharma",   roll: "CS22BTECH11031", attended: 20, total: 20),
+            ]),
+    ]
+
+    var body: some View {
+        NavigationView {
+            ScrollView {
+                VStack(spacing: 16) {
+                    ForEach(courses) { course in
+                        NavigationLink(destination: CourseAnalyticsDetailView(course: course)) {
+                            CourseAnalyticsCard(course: course)
+                        }
+                        .buttonStyle(PlainButtonStyle())
+                    }
+                }
+                .padding(.vertical)
+            }
+            .background(Color.gray.opacity(0.1))
+            .navigationTitle("Analytics")
+        }
+    }
+}
+
+struct CourseAnalyticsCard: View {
+    let course: CourseAnalytics
+    private var pct: Double { course.overallPercentage }
+    private var statusColor: Color { pct >= 75 ? Color(red: 0.204, green: 0.659, blue: 0.325) : pct >= 60 ? Color(red: 0.984, green: 0.467, blue: 0.094) : .red }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ZStack(alignment: .bottomLeading) {
+                course.cls.bannerColor.frame(height: 56)
+                Text(course.cls.name)
+                    .font(.headline).bold().foregroundColor(.white)
+                    .padding([.leading, .bottom], 12)
+            }
+            .clipShape(CornerShape(radius: 15, corners: [.topLeft, .topRight]))
+
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(course.cls.code).font(.caption).foregroundColor(.secondary)
+                    Text("\(course.students.count) students").font(.caption).foregroundColor(.secondary)
+                    ProgressView(value: pct, total: 100)
+                        .progressViewStyle(LinearProgressViewStyle(tint: statusColor))
+                        .frame(width: 160)
+                }
+                Spacer()
+                Text(String(format: "%.0f%%", pct))
+                    .font(.title2).bold().foregroundColor(statusColor)
+            }
+            .padding(14)
+            .background(Color.white)
+            .clipShape(CornerShape(radius: 15, corners: [.bottomLeft, .bottomRight]))
+        }
+        .shadow(color: Color.black.opacity(0.08), radius: 5, x: 0, y: 2)
+        .padding(.horizontal)
+    }
+}
+
+struct CourseAnalyticsDetailView: View {
+    let course: CourseAnalytics
+
+    var body: some View {
+        List {
+            ForEach(course.students) { student in
+                let pct = student.percentage
+                let color: Color = pct >= 75 ? Color(red: 0.204, green: 0.659, blue: 0.325) : pct >= 60 ? Color(red: 0.984, green: 0.467, blue: 0.094) : .red
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(student.name).font(.subheadline).fontWeight(.medium)
+                        Text(student.roll).font(.caption).foregroundColor(.secondary)
+                        ProgressView(value: pct, total: 100)
+                            .progressViewStyle(LinearProgressViewStyle(tint: color))
+                            .frame(width: 140)
+                    }
+                    Spacer()
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text(String(format: "%.0f%%", pct)).font(.title3).bold().foregroundColor(color)
+                        Text("\(student.attended)/\(student.total)").font(.caption).foregroundColor(.secondary)
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+        }
+        .listStyle(.plain)
+        .navigationTitle(course.cls.name)
+    }
+}
+
+
+---
+./Frontend-iOS/AttendanceApp/QRScannerView.swift
+---
+import SwiftUI
+import AVFoundation
+
+// MARK: - QR Scanner (back camera)
+
+struct QRScannerView: UIViewControllerRepresentable {
+    var onScanned: (String) -> Void
+
+    func makeUIViewController(context: Context) -> QRScannerVC {
+        let vc = QRScannerVC()
+        vc.onScanned = onScanned
+        return vc
+    }
+    func updateUIViewController(_ uiViewController: QRScannerVC, context: Context) {}
+}
+
+class QRScannerVC: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
+    var onScanned: ((String) -> Void)?
+    private var session = AVCaptureSession()
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .black
+        guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
+              let input = try? AVCaptureDeviceInput(device: device),
+              session.canAddInput(input) else { return }
+
+        session.addInput(input)
+        let output = AVCaptureMetadataOutput()
+        guard session.canAddOutput(output) else { return }
+        session.addOutput(output)
+        output.setMetadataObjectsDelegate(self, queue: .main)
+        output.metadataObjectTypes = [.qr]
+
+        let preview = AVCaptureVideoPreviewLayer(session: session)
+        preview.frame = view.bounds
+        preview.videoGravity = .resizeAspectFill
+        view.layer.addSublayer(preview)
+
+        // Overlay: scanning frame
+        let box = UIView(frame: CGRect(x: view.bounds.midX - 120, y: view.bounds.midY - 120, width: 240, height: 240))
+        box.layer.borderColor = UIColor.white.cgColor
+        box.layer.borderWidth = 2
+        box.layer.cornerRadius = 12
+        view.addSubview(box)
+
+        DispatchQueue.global(qos: .userInitiated).async { self.session.startRunning() }
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        session.stopRunning()
+    }
+
+    func metadataOutput(_ output: AVCaptureMetadataOutput,
+                        didOutput objects: [AVMetadataObject],
+                        from connection: AVCaptureConnection) {
+        if let obj = objects.first as? AVMetadataMachineReadableCodeObject,
+           let value = obj.stringValue {
+            session.stopRunning()
+            onScanned?(value)
+        }
+    }
+}
+
+// MARK: - QR Scan Screen (student)
+
+struct StudentQRScanView: View {
+    var onSuccess: () -> Void
+    @State private var scanned = false
+    @State private var scannedValue = ""
+    @Environment(\.dismiss) var dismiss
+
+    var body: some View {
+        ZStack(alignment: .bottom) {
+            if !scanned {
+                QRScannerView { value in
+                    scannedValue = value
+                    scanned = true
+                }
+                .ignoresSafeArea()
+
+                VStack {
+                    Text("Point camera at QR code")
+                        .font(.subheadline).foregroundColor(.white)
+                        .padding(10)
+                        .background(Color.black.opacity(0.5))
+                        .cornerRadius(8)
+                }
+                .padding(.bottom, 60)
+            } else {
+                VStack(spacing: 20) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 72))
+                        .foregroundColor(Color(red: 0.204, green: 0.659, blue: 0.325))
+                    Text("QR Scanned!")
+                        .font(.title2).bold()
+                    Text(scannedValue)
+                        .font(.caption).foregroundColor(.secondary)
+                    Button(action: { onSuccess(); dismiss() }) {
+                        Text("Continue to Face Verify")
+                            .font(.headline).foregroundColor(.white)
+                            .frame(maxWidth: .infinity).padding()
+                            .background(Color(red: 0.102, green: 0.451, blue: 0.910))
+                            .cornerRadius(10)
+                    }
+                    .padding(.horizontal, 28)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color.gray.opacity(0.07))
+            }
+        }
+        .navigationTitle("Scan QR")
+    }
+}
+
+
+---
+./Frontend-iOS/AttendanceApp/RoleSelectionView.swift
+---
+import SwiftUI
+
+// MARK: - Role Selection
+struct RoleSelectionView: View {
+    @Binding var isLoggedIn: Bool
+    @Binding var role: UserRole
+    @State private var navigateToLogin = false
+    @State private var selectedRole: UserRole = .student
+
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 32) {
+                Spacer()
+                VStack(spacing: 8) {
+                    Image("iithlogo")
+                        .resizable().scaledToFit()
+                        .frame(width: 80, height: 80)
+                    Text("Attendance Portal")
+                        .font(.largeTitle).bold()
+                    Text("IIT Hyderabad")
+                        .font(.subheadline).foregroundColor(.secondary)
+                }
+
+                VStack(spacing: 14) {
+                    Text("I am a...")
+                        .font(.headline).foregroundColor(.secondary)
+                    RoleButton(title: "Student",   icon: "graduationcap.fill", selected: selectedRole == .student)   { selectedRole = .student }
+                    RoleButton(title: "Professor", icon: "person.fill.checkmark", selected: selectedRole == .professor) { selectedRole = .professor }
+                    RoleButton(title: "Admin",     icon: "shield.fill",        selected: selectedRole == .admin)     { selectedRole = .admin }
+                }
+                .padding(.horizontal, 28)
+
+                NavigationLink(destination: LoginView(isLoggedIn: $isLoggedIn, role: $role, selectedRole: selectedRole),
+                               isActive: $navigateToLogin) { EmptyView() }
+
+                Button(action: { navigateToLogin = true }) {
+                    Text("Continue")
+                        .font(.headline).foregroundColor(.white)
+                        .frame(maxWidth: .infinity).padding()
+                        .background(Color(red: 0.102, green: 0.451, blue: 0.910))
+                        .cornerRadius(10)
+                }
+                .padding(.horizontal, 28)
+
+                Spacer()
+            }
+            .background(Color.gray.opacity(0.07).ignoresSafeArea())
+            .navigationBarHidden(true)
+        }
+    }
+}
+
+struct RoleButton: View {
+    let title: String
+    let icon: String
+    let selected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 14) {
+                Image(systemName: icon)
+                    .font(.title3)
+                    .foregroundColor(selected ? .white : Color(red: 0.102, green: 0.451, blue: 0.910))
+                    .frame(width: 36)
+                Text(title)
+                    .font(.headline)
+                    .foregroundColor(selected ? .white : .primary)
+                Spacer()
+                if selected {
+                    Image(systemName: "checkmark")
+                        .foregroundColor(.white)
+                }
+            }
+            .padding()
+            .background(selected ? Color(red: 0.102, green: 0.451, blue: 0.910) : Color.white)
+            .cornerRadius(12)
+            .shadow(color: Color.black.opacity(0.07), radius: 4, x: 0, y: 2)
+        }
+    }
+}
+
+
+---
+./Frontend-iOS/AttendanceApp/Assets.xcassets/Contents.json
+---
+{
+  "info" : {
+    "author" : "xcode",
+    "version" : 1
+  }
+}
+
+
+---
+./Frontend-iOS/AttendanceApp/Assets.xcassets/AccentColor.colorset/Contents.json
+---
+{
+  "colors" : [
+    {
+      "idiom" : "universal"
+    }
+  ],
+  "info" : {
+    "author" : "xcode",
+    "version" : 1
+  }
+}
+
+
+---
+./Frontend-iOS/AttendanceApp/Assets.xcassets/iithlogo.imageset/Contents.json
+---
+{
+  "images" : [
+    {
+      "filename" : "iithlogo.png",
+      "idiom" : "universal",
+      "scale" : "1x"
+    },
+    {
+      "idiom" : "universal",
+      "scale" : "2x"
+    },
+    {
+      "idiom" : "universal",
+      "scale" : "3x"
+    }
+  ],
+  "info" : {
+    "author" : "xcode",
+    "version" : 1
+  }
+}
+
+
+---
+./Frontend-iOS/AttendanceApp/Assets.xcassets/AppIcon.appiconset/Contents.json
+---
+{
+  "images" : [
+    {
+      "filename" : "iithlogo.png",
+      "idiom" : "universal",
+      "platform" : "ios",
+      "size" : "1024x1024"
+    },
+    {
+      "appearances" : [
+        {
+          "appearance" : "luminosity",
+          "value" : "dark"
+        }
+      ],
+      "filename" : "iithlogo.png",
+      "idiom" : "universal",
+      "platform" : "ios",
+      "size" : "1024x1024"
+    },
+    {
+      "appearances" : [
+        {
+          "appearance" : "luminosity",
+          "value" : "tinted"
+        }
+      ],
+      "filename" : "iithlogo.png",
+      "idiom" : "universal",
+      "platform" : "ios",
+      "size" : "1024x1024"
+    }
+  ],
+  "info" : {
+    "author" : "xcode",
+    "version" : 1
+  }
+}
+
+
+---

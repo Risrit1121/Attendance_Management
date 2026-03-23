@@ -1,0 +1,20 @@
+{
+    "logs": [
+        {
+            "outputFile": "com.iith.attendance.app-mergeDebugResources-62:/values-hdpi-v4/values-hdpi-v4.xml",
+            "map": [
+                {
+                    "source": "/home/soam/.gradle/caches/9.0.0/transforms/e5f650313a36fc94c65f43fd0f07df4b/transformed/appcompat-1.6.1/res/values-hdpi-v4/values-hdpi-v4.xml",
+                    "from": {
+                        "startLines": "2",
+                        "startColumns": "4",
+                        "startOffsets": "55",
+                        "endLines": "6",
+                        "endColumns": "13",
+                        "endOffsets": "327"
+                    }
+                }
+            ]
+        }
+    ]
+}
