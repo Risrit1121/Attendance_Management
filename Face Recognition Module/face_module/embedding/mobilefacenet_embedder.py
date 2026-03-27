@@ -6,6 +6,7 @@ class MobileFaceNet:
 
     def __init__(self):
         self.app = FaceAnalysis(name="buffalo_sc")
+        #self.app = FaceAnalysis(name="buffalo_sc", providers=['CPUExecutionProvider'])
         self.app.prepare(
             ctx_id=-1,
             det_size=(320,320)
