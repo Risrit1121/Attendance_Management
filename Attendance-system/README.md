@@ -98,8 +98,8 @@ Opens at `http://localhost:3000`
 
 | Role      | Email           | Password    |
 |-----------|-----------------|-------------|
-| Professor | bob1@test.com   | password123 |
-| Admin     | trudy1@test.com | password123 |
+| Professor | profA@test.com   | password123 |
+| Admin     | admin@test.com | password123 |
 
 ---
 
@@ -133,6 +133,8 @@ Opens at `http://localhost:3000`
 | GET    | `/admin/stats`              | System stats                 |
 | GET    | `/analytics/course/:id`     | Per-course analytics         |
 | GET    | `/analytics/prof/:id`       | Professor analytics          |
+| GET    | `/course/<course_id>/students` | Get students of a course       |
+| GET    | `/professor/<prof_id>/students` | Get deduplicated student count |
 
 ---
 

@@ -32,6 +32,11 @@ export default function Layout({ page, setPage, children }) {
           <div className="w-8 h-8 rounded-xl bg-azure-500 flex items-center justify-center shrink-0 shadow-glow">
             <GraduationCap size={15} className="text-white" />
           </div>
+          {/* <img
+            src="/IITH.png"
+            alt="IITH Logo"
+            className="w-8 h-8 object-contain"
+          /> */}
           {!collapsed && (
             <div className="min-w-0">
               <p className="text-snow font-bold text-sm leading-none">DIAMS</p>
