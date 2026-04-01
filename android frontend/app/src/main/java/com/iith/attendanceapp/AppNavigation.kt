@@ -6,7 +6,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 
-enum class UserRole { STUDENT, PROFESSOR }
+enum class UserRole { STUDENT, PROFESSOR, ADMIN }
 
 @Composable
 fun AttendanceApp() {
@@ -17,6 +17,7 @@ fun AttendanceApp() {
         when (role) {
             UserRole.STUDENT   -> StudentTabView(onLogout = { isLoggedIn = false })
             UserRole.PROFESSOR -> ProfessorTabView(onLogout = { isLoggedIn = false })
+            UserRole.ADMIN     -> AdminTabView(onLogout = { isLoggedIn = false })
         }
     } else {
         RoleSelectionScreen(

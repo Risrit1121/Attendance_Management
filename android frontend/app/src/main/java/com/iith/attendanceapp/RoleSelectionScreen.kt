@@ -9,6 +9,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.School
+import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -59,6 +60,13 @@ fun RoleSelectionScreen(onContinue: (UserRole) -> Unit) {
             icon = Icons.Default.Person,
             selected = selected == UserRole.PROFESSOR,
             onClick = { selected = UserRole.PROFESSOR }
+        )
+        Spacer(Modifier.height(14.dp))
+        RoleButton(
+            title = "Admin",
+            icon = Icons.Default.Shield,
+            selected = selected == UserRole.ADMIN,
+            onClick = { selected = UserRole.ADMIN }
         )
 
         Spacer(Modifier.height(32.dp))
