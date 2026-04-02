@@ -152,17 +152,6 @@ Opens at `http://localhost:3000`
 
 ---
 
-## Bug Fixes (Sprint 2 → current)
-
-| # | Bug | Fix |
-|---|-----|-----|
-| 1 | **Black bars in Admin Analytics chart** | Replaced invalid `<rect>` children (plain HTML) inside Recharts `<Bar>` with the correct `<Cell>` component from recharts, which properly injects `fill` per-bar inside the SVG layer. |
-| 2 | **Blank dashboard after logging out as Admin and logging in as Prof** | Added a `useEffect` in `App.js` that resets `page` to `"dashboard"` whenever `user.user_id` changes, preventing stale page state from carrying over between sessions. |
-| 3 | **Lands on Analytics instead of Dashboard when switching professor accounts** | Same root cause as #2 — fixed by the same `useEffect` reset in `App.js`. |
-| 4 | **"View All Sessions" in Admin panel always showed an error** | The `/admin/sessions` route was accidentally commented out in `main.py`. It has been uncommented and is now live. |
-
----
-
 ## Author
 
 **Soham Rajesh Pawar**, CS22BTECH11055  
