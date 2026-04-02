@@ -38,6 +38,8 @@ export const manualAttendanceBulk = (data)      => API.post("/manualAttendance/b
 export const getAdminStats      = ()         => API.get("/admin/stats");
 export const getCourseAnalytics = (courseId) => API.get(`/analytics/course/${courseId}`);
 export const getProfAnalytics   = (profId)   => API.get(`/analytics/prof/${profId}`);
+export const getStudentCourseHistory = (studentId, courseId) => API.get(`/student/${studentId}/history/${courseId}`);
+export const getAtRiskStudents = (profId) => API.get(`/analytics/at-risk/${profId}`);
 
 // ── Beacon ────────────────────────────────────────────────────────────────────
 export const getMinor       = (major)        => API.get(`/getMinor?major=${major}`);

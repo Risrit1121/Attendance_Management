@@ -96,7 +96,7 @@ export default function Login() {
           {/* Demo credentials hint */}
           <div className="mt-6 p-3 rounded-xl bg-white/3 border border-edge">
             <p className="text-dim text-xs font-mono text-center">
-              Demo: bob1@test.com / password123
+              Demo: profA@test.com / password123
             </p>
           </div>
         </div>
