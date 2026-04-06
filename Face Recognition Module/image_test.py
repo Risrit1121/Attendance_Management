@@ -1,3 +1,4 @@
+import ast
 import base64
 import numpy as np
 import cv2
@@ -16,6 +17,9 @@ face_app.prepare(ctx_id=-1)  # CPU
 
 CSV_FILE = "embeddings.csv"
 
+@app.route("/")
+def home():
+    return {"message": "Server is running"}
 
 # ---------------- UTIL ----------------
 def decode_image(img_b64):
@@ -62,7 +66,7 @@ def load_embeddings(user_id):
 
         for row in reader:
             if row["user_id"] == user_id:
-                emb = np.array(eval(row["embedding"]))
+                emb = np.array(ast.literal_eval(row["embedding"]))
                 embeddings.append(emb)
 
     return embeddings
@@ -155,4 +159,4 @@ def verify():
 
 # ---------------- RUN ----------------
 if __name__ == "__main__":
-    app.run(debug=True, port=5000)
+    app.run(host="0.0.0.0", port=5000, debug=True)
