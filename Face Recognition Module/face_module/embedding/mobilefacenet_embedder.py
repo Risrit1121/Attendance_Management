@@ -1,9 +1,7 @@
 import numpy as np
 from insightface.app import FaceAnalysis
 
-
 class MobileFaceNet:
-
     def __init__(self):
         self.app = FaceAnalysis(name="buffalo_sc")
         self.app.prepare(
@@ -11,12 +9,24 @@ class MobileFaceNet:
             det_size=(320,320)
         )
 
-    def get_embedding(self, image):
+    # NEW FUNCTION:
+    def get_embedding_and_kps(self, image):
         faces = self.app.get(image)
 
         if len(faces) == 0:
-            return None
+            return None, None
 
+        embedding = faces[0].embedding
+        embedding = embedding / np.linalg.norm(embedding)
+        
+        # faces[0].kps contains 5 landmarks: left_eye, right_eye, nose, left_mouth, right_mouth
+        kps = faces[0].kps 
+        return embedding, kps
+
+    def get_embedding(self, image):
+        faces = self.app.get(image)
+        if len(faces) == 0:
+            return None
         embedding = faces[0].embedding
         embedding = embedding / np.linalg.norm(embedding)
         return embedding
