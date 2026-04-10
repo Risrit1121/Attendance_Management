@@ -1,7 +1,9 @@
 package com.iith.attendanceapp
 
 import android.Manifest
+import android.bluetooth.BluetoothManager
 import android.content.pm.PackageManager
+import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
@@ -247,15 +249,42 @@ fun FaceCameraScreen(onSuccess: () -> Unit) {
 }
 
 // ── BLE Student Screen ────────────────────────────────────────────────────────
+private const val TARGET_UUID = "550e8400-e29b-41d4-a716-446655440000"
+
 @Composable
 fun StudentBLEScreen(onSuccess: () -> Unit) {
-    var timeLeft by remember { mutableStateOf(120) }
+    var timeLeft  by remember { mutableStateOf(120) }
+    var scanning  by remember { mutableStateOf(false) }
+    var results   by remember { mutableStateOf<List<BleBeaconResult>>(emptyList()) }
+    var errorMsg  by remember { mutableStateOf<String?>(null) }
+    val context   = LocalContext.current
 
+    // BLE permissions needed
+    val blePermissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        arrayOf(
+            Manifest.permission.BLUETOOTH_SCAN,
+            Manifest.permission.BLUETOOTH_CONNECT
+        )
+    } else {
+        arrayOf(
+            Manifest.permission.ACCESS_FINE_LOCATION
+        )
+    }
+
+    var permissionsGranted by remember {
+        mutableStateOf(
+            blePermissions.all {
+                ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
+            }
+        )
+    }
+    val permLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { grants -> permissionsGranted = grants.values.all { it } }
+
+    // Countdown timer
     LaunchedEffect(Unit) {
-        while (timeLeft > 0) {
-            delay(1000)
-            timeLeft--
-        }
+        while (timeLeft > 0) { delay(1000); timeLeft-- }
     }
 
     val infiniteTransition = rememberInfiniteTransition(label = "ble")
@@ -265,17 +294,21 @@ fun StudentBLEScreen(onSuccess: () -> Unit) {
     )
 
     Column(
-        modifier = Modifier.fillMaxSize().padding(horizontal = 24.dp),
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Text("BLE Scan", fontSize = 18.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(8.dp))
         Text(
-            "Stay in the classroom. BLE beacon is being detected...",
+            "Stay in the classroom. Tap Scan to detect the BLE beacon.",
             fontSize = 13.sp, color = Color.Gray, textAlign = TextAlign.Center
         )
         Spacer(Modifier.height(32.dp))
 
+        // Countdown ring
         Box(contentAlignment = Alignment.Center, modifier = Modifier.size(120.dp)) {
             CircularProgressIndicator(
                 progress = { timeLeft / 120f },
@@ -287,21 +320,97 @@ fun StudentBLEScreen(onSuccess: () -> Unit) {
             Text("%d:%02d".format(timeLeft / 60, timeLeft % 60), fontSize = 24.sp, fontWeight = FontWeight.Bold)
         }
 
-        Spacer(Modifier.height(32.dp))
+        Spacer(Modifier.height(24.dp))
 
+        // Pulsing BLE dot
         Box(
-            modifier = Modifier.size(90.dp).clip(CircleShape).background(GPurple.copy(alpha = alpha)),
+            modifier = Modifier.size(70.dp).clip(CircleShape)
+                .background(GPurple.copy(alpha = if (scanning) alpha else 0.3f)),
             contentAlignment = Alignment.Center
-        ) { Text("BLE", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp) }
+        ) { Text("BLE", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp) }
 
-        Spacer(Modifier.height(32.dp))
+        Spacer(Modifier.height(24.dp))
 
-        // TODO: replace with actual BLE beacon detection + backend verification
+        // Scan button
         Button(
-            onClick = onSuccess,
+            onClick = {
+                if (!permissionsGranted) {
+                    permLauncher.launch(blePermissions)
+                } else {
+                    val btManager = context.getSystemService(android.content.Context.BLUETOOTH_SERVICE) as BluetoothManager
+                    if (btManager.adapter?.isEnabled == false) {
+                        errorMsg = "Bluetooth is turned off. Please enable it."
+                    } else {
+                        scanning = true
+                        errorMsg = null
+                        results  = emptyList()
+                        startBleScan(context, TARGET_UUID) { found ->
+                            scanning = false
+                            results  = found
+                            if (found.isEmpty()) errorMsg = "No beacon found with the target UUID."
+                        }
+                    }
+                }
+            },
+            enabled = !scanning,
             modifier = Modifier.fillMaxWidth().height(52.dp),
             shape = RoundedCornerShape(10.dp),
             colors = ButtonDefaults.buttonColors(containerColor = GPurple)
-        ) { Text("BLE Verified \u2713  \u2192  Face Verify", fontWeight = FontWeight.Bold) }
+        ) {
+            if (scanning) {
+                CircularProgressIndicator(color = Color.White, modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                Spacer(Modifier.width(10.dp))
+                Text("Scanning for 3s...", fontWeight = FontWeight.Bold)
+            } else {
+                Text("Scan", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+            }
+        }
+
+        // Error message
+        if (errorMsg != null) {
+            Spacer(Modifier.height(12.dp))
+            Text(errorMsg!!, color = Color.Red, fontSize = 13.sp, textAlign = TextAlign.Center)
+        }
+
+        // Results
+        if (results.isNotEmpty()) {
+            Spacer(Modifier.height(20.dp))
+            Text("Beacon Detected", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = GPurple)
+            Spacer(Modifier.height(10.dp))
+            results.forEach { r ->
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Color.White)
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    BleResultRow("UUID",     r.uuid)
+                    BleResultRow("Major",    "${r.major}")
+                    BleResultRow("Minor",    "${r.minor}")
+                    BleResultRow("Avg RSSI", "${"%.1f".format(r.avgRssi)} dBm")
+                }
+                Spacer(Modifier.height(8.dp))
+            }
+            Spacer(Modifier.height(16.dp))
+            // TODO: send results to backend for verification, then call onSuccess()
+            Button(
+                onClick = onSuccess,
+                modifier = Modifier.fillMaxWidth().height(52.dp),
+                shape = RoundedCornerShape(10.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = GPurple)
+            ) { Text("BLE Verified \u2713  \u2192  Face Verify", fontWeight = FontWeight.Bold) }
+        }
+
+        Spacer(Modifier.height(24.dp))
+    }
+}
+
+@Composable
+private fun BleResultRow(label: String, value: String) {
+    Row(modifier = Modifier.fillMaxWidth()) {
+        Text("$label: ", fontSize = 13.sp, color = Color.Gray, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(80.dp))
+        Text(value, fontSize = 13.sp, color = Color.Black)
     }
 }
