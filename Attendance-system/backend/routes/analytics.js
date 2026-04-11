@@ -1,14 +1,16 @@
 /**
- * Analytics — lecture is the unit of measurement.
+ * analytics.js — lecture-based attendance analytics.
  *
- * A lecture can have MULTIPLE sessions (e.g. BLE check-in at start + QR at end).
- * A student is counted as PRESENT for a lecture only if they appear in
- * ALL sessions of that lecture.
+ * KEY FIX: lectureStats is now built from course.lectures (the canonical list),
+ * not from the set of sessions. This means:
+ *  - A lecture with no sessions shows up with attended=0
+ *  - A lecture with sessions uses the intersection rule
+ *  - The heatmap/history for a student is derived from the intersection result
  *
- * Core helper: buildLectureAttendance(sessions, records)
- *   For each lectureUID, intersects the attendee sets across all its sessions.
+ * The `hasSession` flag on each lecture stat tells the frontend whether
+ * any sessions have been held for that lecture.
  */
-const express   = require('express');
+const express    = require('express');
 const Attendance = require('../models/Attendance');
 const Session    = require('../models/Session');
 const Course     = require('../models/Course');
@@ -19,17 +21,15 @@ const { authenticate, authorize } = require('../middleware/auth');
 
 const router = express.Router();
 
-// ── Core intersection logic ───────────────────────────────────────────────────
+// ── Core intersection ─────────────────────────────────────────────────────────
 /**
- * For each unique (courseId, lectureUID) pair among the given sessions,
- * computes the SET of students who attended ALL sessions of that lecture.
+ * For each (courseId, lectureUID) pair among the sessions array, computes
+ * the SET of students who attended ALL sessions of that lecture.
  *
  * Returns Map< `${courseId}::${lectureUID}` , LectureEntry >
- *   where LectureEntry = { courseId, lectureUID, sessionUIDs[], presentInAll: Set<studentId> }
  */
 function buildLectureAttendance(sessions, records) {
-  // 1. Group sessions by lecture key
-  const lectureMap = new Map();
+  const lectureMap  = new Map();
   for (const s of sessions) {
     const key = `${s.course}::${s.lectureUID}`;
     if (!lectureMap.has(key)) {
@@ -37,48 +37,37 @@ function buildLectureAttendance(sessions, records) {
         courseId:    String(s.course),
         lectureUID:  s.lectureUID,
         sessionUIDs: [],
-        presentInAll: null, // computed below
+        presentInAll: null,
       });
     }
     lectureMap.get(key).sessionUIDs.push(s.sessionUID);
   }
 
-  // 2. Index attendance: sessionUID → Set<studentId>
   const sessStudents = new Map();
   for (const r of records) {
     if (!sessStudents.has(r.sessionUID)) sessStudents.set(r.sessionUID, new Set());
-    sessStudents.get(r.sessionUID).add(r.student);
+    sessStudents.get(r.sessionUID).add(String(r.student));
   }
 
-  // 3. For each lecture, intersect across all its sessions
   for (const lec of lectureMap.values()) {
-    if (lec.sessionUIDs.length === 0) {
-      lec.presentInAll = new Set();
-      continue;
-    }
-    // Start from the smallest set (optimisation) — copy so we can mutate
+    if (!lec.sessionUIDs.length) { lec.presentInAll = new Set(); continue; }
     const sorted = [...lec.sessionUIDs].sort(
       (a, b) => (sessStudents.get(a)?.size || 0) - (sessStudents.get(b)?.size || 0)
     );
-    let intersection = new Set(sessStudents.get(sorted[0]) || []);
-    for (let i = 1; i < sorted.length; i++) {
-      const others = sessStudents.get(sorted[i]) || new Set();
-      for (const sid of intersection) {
-        if (!others.has(sid)) intersection.delete(sid);
-      }
-      if (intersection.size === 0) break; // short-circuit
+    let inter = new Set(sessStudents.get(sorted[0]) || []);
+    for (let i = 1; i < sorted.length && inter.size > 0; i++) {
+      const o = sessStudents.get(sorted[i]) || new Set();
+      for (const sid of inter) { if (!o.has(sid)) inter.delete(sid); }
     }
-    lec.presentInAll = intersection;
+    lec.presentInAll = inter;
   }
-
   return lectureMap;
 }
 
-// ── Auth helper ───────────────────────────────────────────────────────────────
 function canAccessCourse(course, userId, role) {
   if (role === 'admin') return true;
-  if (course.instructors.includes(userId)) return true;
-  return Array.isArray(course.tas) && course.tas.includes(userId);
+  if (course.instructors.map(String).includes(String(userId))) return true;
+  return Array.isArray(course.tas) && course.tas.map(String).includes(String(userId));
 }
 
 // ── GET /analytics/course/:courseId ──────────────────────────────────────────
@@ -99,12 +88,13 @@ router.get('/course/:courseId', authenticate, async (req, res, next) => {
     const records    = await Attendance.find({ sessionUID: { $in: sessions.map(s => s.sessionUID) } }).lean();
     const lectureMap = buildLectureAttendance(sessions, records);
 
-    // Index sessions by UID for per-session breakdown
+    // Per-session detail lookup
     const sessById = Object.fromEntries(sessions.map(s => [s.sessionUID, s]));
 
+    // Build lecture stats from course.lectures (canonical)
     const lectureStats = course.lectures.map(l => {
-      const key = `${courseId}::${l.lectureUID}`;
-      const lec = lectureMap.get(key);
+      const key       = `${courseId}::${l.lectureUID}`;
+      const lec       = lectureMap.get(key);
       const sessionUIDs = lec?.sessionUIDs || [];
       const attended    = lec?.presentInAll?.size || 0;
 
@@ -112,23 +102,23 @@ router.get('/course/:courseId', authenticate, async (req, res, next) => {
         lectureUID:    l.lectureUID,
         scheduledTime: l.scheduledTime,
         cancelled:     l.cancelled,
+        hasSession:    sessionUIDs.length > 0,
         sessionCount:  sessionUIDs.length,
-        // Per-session detail (how many raw marks in each session)
         sessions: sessionUIDs.map(suid => ({
           sessionUID:  suid,
           method:      sessById[suid]?.method,
           timestamp:   sessById[suid]?.timestamp,
           markedCount: records.filter(r => r.sessionUID === suid).length,
         })),
-        attended,       // students present in ALL sessions
-        enrolled:       enrolledCount,
-        attendancePct:  enrolledCount > 0
+        attended,
+        enrolled:      enrolledCount,
+        attendancePct: enrolledCount > 0
           ? parseFloat(((attended / enrolledCount) * 100).toFixed(1))
           : 0,
       };
     });
 
-    const lecturesHeld  = lectureStats.filter(l => l.sessionCount > 0);
+    const lecturesHeld  = lectureStats.filter(l => l.hasSession && !l.cancelled);
     const totalAttended = lectureStats.reduce((s, l) => s + l.attended, 0);
     const totalPossible = lecturesHeld.length * enrolledCount;
 
@@ -169,10 +159,11 @@ router.get('/course/:courseId/students', authenticate, async (req, res, next) =>
       student:    { $in: studentIds },
     }).lean();
 
-    const lectureMap    = buildLectureAttendance(sessions, records);
-    const totalLectures = lectureMap.size; // lectures that have ≥1 session
+    const lectureMap = buildLectureAttendance(sessions, records);
 
-    // Per-student: count lectures where they appear in presentInAll
+    // Number of lectures that have ≥1 session (lectures held)
+    const totalLectures = lectureMap.size;
+
     const studentCount = {};
     for (const lec of lectureMap.values()) {
       for (const sid of lec.presentInAll) {
@@ -180,11 +171,10 @@ router.get('/course/:courseId/students', authenticate, async (req, res, next) =>
       }
     }
 
-    const students = await Student.find({ _id: { $in: studentIds } })
-      .select('-password').lean();
+    const students = await Student.find({ _id: { $in: studentIds } }).select('-password').lean();
 
     const studentStats = students.map(s => {
-      const attended = studentCount[s._id] || 0;
+      const attended = studentCount[String(s._id)] || 0;
       return {
         student_id:    s._id,
         name:          s.name,
@@ -225,37 +215,35 @@ router.get('/prof/:profId', authenticate, async (req, res, next) => {
       ]),
     ]);
 
-    const enrollMap   = Object.fromEntries(enrollAgg.map(e => [String(e._id), e.count]));
-    const records     = await Attendance.find({ sessionUID: { $in: sessions.map(s => s.sessionUID) } }).lean();
-    const lectureMap  = buildLectureAttendance(sessions, records);
+    const enrollMap  = Object.fromEntries(enrollAgg.map(e => [String(e._id), e.count]));
+    const records    = await Attendance.find({ sessionUID: { $in: sessions.map(s => s.sessionUID) } }).lean();
+    const lectureMap = buildLectureAttendance(sessions, records);
 
-    // Group lecture entries by course
+    // Group by course
     const lecsByCourse = {};
-    for (const lec of lectureMap.values()) {
-      if (!lecsByCourse[lec.courseId]) lecsByCourse[lec.courseId] = [];
-      lecsByCourse[lec.courseId].push(lec);
+    for (const [key, lec] of lectureMap.entries()) {
+      const cid = lec.courseId;
+      if (!lecsByCourse[cid]) lecsByCourse[cid] = [];
+      lecsByCourse[cid].push(lec);
     }
 
     const result = courses.map(c => {
-      const cid         = String(c._id);
-      const lecs        = lecsByCourse[cid] || [];
-      const enrolled    = enrollMap[cid] || 0;
-      const totalAtt    = lecs.reduce((s, l) => s + l.presentInAll.size, 0);
-      const possible    = lecs.length * enrolled;
+      const cid      = String(c._id);
+      const lecs     = lecsByCourse[cid] || [];
+      const enrolled = enrollMap[cid] || 0;
+      const totalAtt = lecs.reduce((s, l) => s + l.presentInAll.size, 0);
+      const possible = lecs.length * enrolled;
 
       return {
-        course_id:    c._id,
-        course_name:  c.name,
-        slot:         c.slot,
-        lectures:     c.lectures.length,          // total scheduled
-        sessions:     sessions.filter(s => String(s.course) === cid).length,
-        lecturesHeld: lecs.length,                // lectures with ≥1 session
+        course_id:   c._id,
+        course_name: c.name,
+        slot:        c.slot,
+        sessions:    sessions.filter(s => String(s.course) === cid).length,
+        lectures:    c.lectures.length,
+        lecturesHeld: lecs.length,
         enrolled,
-        attendance:   totalAtt,
-        avg:          lecs.length > 0
-          ? parseFloat((totalAtt / lecs.length).toFixed(1))
-          : 0,
-        avg_pct:      possible > 0
+        attendance:  totalAtt,
+        avg_pct:     possible > 0
           ? parseFloat(((totalAtt / possible) * 100).toFixed(1))
           : 0,
       };
@@ -268,60 +256,50 @@ router.get('/prof/:profId', authenticate, async (req, res, next) => {
 // ── GET /analytics/at-risk/:profId ────────────────────────────────────────────
 router.get('/at-risk/:profId', authenticate, async (req, res, next) => {
   try {
-    const { profId }  = req.params;
+    const { profId } = req.params;
     if (req.user.role !== 'admin' && req.user.user_id !== profId) {
       return res.status(403).json({ error: 'Forbidden' });
     }
-
-    const THRESHOLD = parseFloat(process.env.AT_RISK_THRESHOLD || '75');
 
     const courses = await Course.find({
       $or: [{ instructors: profId }, { tas: profId }],
     }).lean();
 
-    if (courses.length === 0) return res.json([]);
-
     const courseIds = courses.map(c => c._id);
     const courseMap = Object.fromEntries(courses.map(c => [String(c._id), c]));
 
-    const [sessions, enrollments] = await Promise.all([
-      Session.find({ course: { $in: courseIds } }).lean(),
-      Enrollment.find({ course: { $in: courseIds }, status: 'Active' }).lean(),
-    ]);
+    const sessions    = await Session.find({ course: { $in: courseIds } }).lean();
+    const sessionUIDs = sessions.map(s => s.sessionUID);
 
-    const studentIds  = [...new Set(enrollments.map(e => e.student))];
-    const records     = await Attendance.find({
-      sessionUID: { $in: sessions.map(s => s.sessionUID) },
-      student:    { $in: studentIds },
-    }).lean();
-
+    const records    = await Attendance.find({ sessionUID: { $in: sessionUIDs } }).lean();
     const lectureMap = buildLectureAttendance(sessions, records);
 
-    // Group lectures by course
+    // Lectures held per course
     const lecsByCourse = {};
-    for (const lec of lectureMap.values()) {
+    for (const [, lec] of lectureMap.entries()) {
       if (!lecsByCourse[lec.courseId]) lecsByCourse[lec.courseId] = [];
       lecsByCourse[lec.courseId].push(lec);
     }
 
-    // Build matrix: student → course → count of fully-attended lectures
+    // Student → course → lecturesAttended
     const matrix = {};
-
-    // Seed all enrolled students with 0 (so we catch 0%-attendance students too)
-    for (const e of enrollments) {
-      if (!matrix[e.student]) matrix[e.student] = {};
-      if (!matrix[e.student][String(e.course)]) matrix[e.student][String(e.course)] = 0;
-    }
-
-    for (const lec of lectureMap.values()) {
+    for (const [, lec] of lectureMap.entries()) {
       for (const sid of lec.presentInAll) {
         if (!matrix[sid]) matrix[sid] = {};
         matrix[sid][lec.courseId] = (matrix[sid][lec.courseId] || 0) + 1;
       }
     }
 
-    const students = await Student.find({ _id: { $in: studentIds } }).select('-password').lean();
-    const sMap     = Object.fromEntries(students.map(s => [s._id, s]));
+    // Also include students with 0 attendance via enrollments
+    const enrollments = await Enrollment.find({ course: { $in: courseIds }, status: 'Active' }).lean();
+    for (const e of enrollments) {
+      const sid = String(e.student);
+      const cid = String(e.course);
+      if (!matrix[sid]) matrix[sid] = {};
+      if (matrix[sid][cid] === undefined) matrix[sid][cid] = 0;
+    }
+
+    const THRESHOLD = parseFloat(process.env.AT_RISK_THRESHOLD || '75');
 
     const atRisk = [];
     for (const [studentId, courseCounts] of Object.entries(matrix)) {
@@ -330,21 +308,21 @@ router.get('/at-risk/:profId', authenticate, async (req, res, next) => {
         if (!total) continue;
         const pct = parseFloat(((attended / total) * 100).toFixed(1));
         if (pct < THRESHOLD) {
-          atRisk.push({
-            student_id:   studentId,
-            student_name: sMap[studentId]?.name || studentId,
-            email:        sMap[studentId]?.email,
-            course_id:    courseId,
-            course_name:  courseMap[courseId]?.name,
-            attended,
-            total,
-            pct,
-          });
+          atRisk.push({ student_id: studentId, course_id: courseId, attended, total, pct });
         }
       }
     }
 
-    res.json(atRisk.sort((a, b) => a.pct - b.pct));
+    const studentIds = [...new Set(atRisk.map(r => r.student_id))];
+    const students   = await Student.find({ _id: { $in: studentIds } }).select('-password').lean();
+    const sMap       = Object.fromEntries(students.map(s => [String(s._id), s]));
+
+    res.json(atRisk.map(r => ({
+      ...r,
+      student_name: sMap[r.student_id]?.name || r.student_id,
+      email:        sMap[r.student_id]?.email,
+      course_name:  courseMap[r.course_id]?.name,
+    })).sort((a, b) => a.pct - b.pct));
   } catch (err) { next(err); }
 });
 
@@ -362,14 +340,14 @@ router.get('/admin', authenticate, authorize('admin'), async (req, res, next) =>
     const records    = await Attendance.find({ sessionUID: { $in: sessions.map(s => s.sessionUID) } }).lean();
     const lectureMap = buildLectureAttendance(sessions, records);
 
-    const enrollAgg  = await Enrollment.aggregate([
+    const enrollAgg = await Enrollment.aggregate([
       { $match: { status: 'Active' } },
       { $group: { _id: '$course', count: { $sum: 1 } } },
     ]);
-    const enrollMap  = Object.fromEntries(enrollAgg.map(e => [String(e._id), e.count]));
+    const enrollMap = Object.fromEntries(enrollAgg.map(e => [String(e._id), e.count]));
 
     const lecsByCourse = {};
-    for (const lec of lectureMap.values()) {
+    for (const [, lec] of lectureMap.entries()) {
       if (!lecsByCourse[lec.courseId]) lecsByCourse[lec.courseId] = [];
       lecsByCourse[lec.courseId].push(lec);
     }
@@ -378,7 +356,7 @@ router.get('/admin', authenticate, authorize('admin'), async (req, res, next) =>
       prof_id:   p._id,
       prof_name: p.name,
       courses: courses
-        .filter(c => c.instructors.includes(p._id))
+        .filter(c => c.instructors.map(String).includes(String(p._id)))
         .map(c => {
           const cid      = String(c._id);
           const lecs     = lecsByCourse[cid] || [];

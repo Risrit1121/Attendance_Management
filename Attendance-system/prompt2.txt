@@ -1,0 +1,4542 @@
+frontend/src/App.js
+---
+import { useState, useEffect } from "react";
+import { AuthProvider, useAuth } from "./context/AuthContext";
+import { SchedulerProvider }     from "./context/SchedulerContext";
+import Layout             from "./components/Layout";
+import Login              from "./pages/Login";
+import ProfessorDashboard from "./pages/ProfessorDashboard";
+import CoursesPage        from "./pages/CoursesPage";
+import CourseView         from "./pages/CourseView";
+import Analytics          from "./pages/Analytics";
+import AdminDashboard     from "./pages/AdminDashboard";
+import AdminOverview      from "./pages/AdminOverview";
+import Students           from "./pages/Students";
+
+function AppContent() {
+  const { user }               = useAuth();
+  const [page, setPage]        = useState("dashboard");
+  const [activeCourse, setActiveCourse] = useState(null);
+
+  // Reset page and active course whenever the logged-in user changes.
+  useEffect(() => {
+    setPage("dashboard");
+    setActiveCourse(null);
+  }, [user?.user_id]);
+
+  if (!user) return <Login />;
+
+  const handleSetPage = (p) => {
+    setPage(p);
+    if (p !== "courses") setActiveCourse(null);
+  };
+
+  // TAs and profs share the same dashboard view
+  const isProfOrTa = user.role === "prof" || user.role === "ta";
+
+  if (page === "courses" && activeCourse) {
+    return (
+      <Layout page={page} setPage={handleSetPage}>
+        <CourseView
+          course={activeCourse}
+          goBack={() => { setActiveCourse(null); }}
+        />
+      </Layout>
+    );
+  }
+
+  return (
+    <Layout page={page} setPage={handleSetPage}>
+      {user.role === "admin" ? (
+        <>
+          {page === "dashboard" && <AdminOverview />}
+          {page === "analytics" && <Analytics />}
+          {page === "admin"     && <AdminDashboard />}
+        </>
+      ) : isProfOrTa ? (
+        <>
+          {page === "dashboard" && (
+            <ProfessorDashboard setPage={handleSetPage} setActiveCourse={setActiveCourse} />
+          )}
+          {page === "courses" && (
+            <CoursesPage setActiveCourse={setActiveCourse} />
+          )}
+          {page === "students"  && <Students />}
+          {page === "analytics" && <Analytics />}
+        </>
+      ) : null /* student role — mobile app only */ }
+    </Layout>
+  );
+}
+
+export default function App() {
+  return (
+    <AuthProvider>
+      <SchedulerProvider>
+        <AppContent />
+      </SchedulerProvider>
+    </AuthProvider>
+  );
+}
+
+---
+frontend/src/index.css
+---
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* { box-sizing: border-box; }
+
+body {
+  background: #0A0C10;
+  color: #E8EBF5;
+  font-family: 'DM Sans', sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #1E2130; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #3A4060; }
+
+/* Noise texture overlay */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.03'/%3E%3C/svg%3E");
+  pointer-events: none;
+  z-index: 9999;
+  opacity: 0.4;
+}
+
+/* Animations */
+.animate-slide-up {
+  opacity: 0;
+  animation: slideUp 0.4s cubic-bezier(0.16,1,0.3,1) forwards;
+}
+.animate-fade-in { animation: fadeIn 0.3s ease forwards; }
+.delay-100 { animation-delay: 100ms; }
+.delay-200 { animation-delay: 200ms; }
+.delay-300 { animation-delay: 300ms; }
+.delay-400 { animation-delay: 400ms; }
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(20px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes pulseRing {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(59,130,246,0.4); }
+  50%       { box-shadow: 0 0 0 12px rgba(59,130,246,0); }
+}
+
+/* Glass card */
+.glass {
+  background: rgba(17,19,24,0.8);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255,255,255,0.06);
+}
+
+/* Active nav item glow */
+.nav-active {
+  background: rgba(59,130,246,0.12);
+  color: #60A5FA;
+}
+
+/* Live badge pulse */
+.live-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: #34D399;
+  animation: pulseRing 2s ease-in-out infinite;
+}
+
+
+---
+frontend/src/index.js
+---
+import React from "react";
+import ReactDOM from "react-dom/client";
+import "./index.css";
+import App from "./App";
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+);
+
+
+---
+frontend/src/pages/AdminCourses.js
+---
+/**
+ * AdminCourses.js
+ *
+ * Fixes:
+ *  - enrollBulk was sending { studentIds } but backend expects { student_ids }
+ *    → fixed to match backend: { course, student_ids }
+ *  - deleteCourse was missing from old AdminCourses, wired up now
+ *  - CSV upload/delete panel added for all entity types
+ *  - Course analytics modal wired to real /analytics/course/:id/students
+ *  - Venue/department fields required by backend added to create form
+ */
+import { useState, useEffect, useCallback } from "react";
+import {
+  getAllCourses, getAllUsers,
+  createCourse, deleteCourse, updateCourse,
+  enrollBulk, unenrollStudent,
+  getCourseEnrolled, getCourseStudentStats,
+  csvBulkCreate, csvBulkDelete,
+} from "../api/client";
+import {
+  Plus, Trash2, BookOpen, Users, ChevronDown, ChevronUp,
+  Search, RefreshCw, GraduationCap, UserPlus, Eye,
+  AlertTriangle, CheckCircle2, Upload, X,
+} from "lucide-react";
+import { Badge, Button, Spinner, Empty, Modal, ProgressBar, AttendancePct } from "../components/UI";
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+const SLOTS = ["A","B","C","D","E","F","G","P","Q","R","S","W","X","Y","Z"];
+const COURSE_COLORS = ["bg-azure-500","bg-jade-500","bg-violet-500","bg-amber-500","bg-rose-500"];
+
+function fmtDate(d) {
+  if (!d) return "—";
+  return new Date(d).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+}
+
+// ── CSV Upload Panel ──────────────────────────────────────────────────────────
+
+function CsvPanel({ onDone }) {
+  const [mode,     setMode]     = useState("create"); // "create" | "delete"
+  const [type,     setType]     = useState("students");
+  const [file,     setFile]     = useState(null);
+  const [saving,   setSaving]   = useState(false);
+  const [result,   setResult]   = useState(null);
+  const [err,      setErr]      = useState("");
+
+  const TYPES = ["students","professors","courses","enrollments"];
+
+  const TEMPLATES = {
+    students:    "_id,name,email,password,imageURL",
+    professors:  "_id,name,email,password,department",
+    courses:     "_id,name,department,slot,venue,startDate,endDate,instructors,tas",
+    enrollments: "student,course",
+  };
+
+  const handleSubmit = async () => {
+    if (!file) { setErr("Please select a CSV file."); return; }
+    setSaving(true);
+    setErr("");
+    setResult(null);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      fd.append("type", type);
+      const res = mode === "create"
+        ? await csvBulkCreate(fd)
+        : await csvBulkDelete(fd);
+      setResult(res.data);
+      setFile(null);
+      onDone();
+    } catch (e) {
+      setErr(e.response?.data?.error || "CSV operation failed.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="bg-card border border-edge rounded-2xl p-5 space-y-4 animate-slide-up">
+      <div className="flex items-center gap-2 mb-1">
+        <Upload size={15} className="text-violet-400" />
+        <h3 className="text-snow font-semibold text-sm">CSV Bulk Operations</h3>
+      </div>
+
+      {/* Mode toggle */}
+      <div className="flex gap-1 p-1 bg-ink rounded-xl border border-edge w-fit">
+        {["create","delete"].map(m => (
+          <button key={m}
+            onClick={() => { setMode(m); setResult(null); setErr(""); }}
+            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+              mode === m
+                ? m === "delete"
+                  ? "bg-rose-500/20 text-rose-400 border border-rose-500/30"
+                  : "bg-azure-500/20 text-azure-400 border border-azure-500/30"
+                : "text-soft hover:text-snow"
+            }`}
+          >
+            {m === "create" ? "Bulk Create" : "Bulk Delete"}
+          </button>
+        ))}
+      </div>
+
+      {/* Type selector */}
+      <div className="flex flex-wrap gap-1.5">
+        {TYPES.map(t => (
+          <button key={t}
+            onClick={() => setType(t)}
+            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors border ${
+              type === t
+                ? "bg-violet-500/15 text-violet-400 border-violet-500/30"
+                : "bg-ink text-soft border-edge hover:text-snow"
+            }`}
+          >
+            {t}
+          </button>
+        ))}
+      </div>
+
+      {/* Template hint */}
+      <div className="bg-ink border border-edge rounded-xl px-4 py-2.5">
+        <p className="text-dim text-xs font-mono">{TEMPLATES[type]}</p>
+        {type === "courses" && (
+          <p className="text-dim text-xs mt-1">
+            instructors/tas = comma-separated IDs within the cell (e.g. "prof1,prof2")
+          </p>
+        )}
+        {mode === "delete" && type !== "enrollments" && (
+          <p className="text-dim text-xs mt-1">Only _id column needed for delete.</p>
+        )}
+      </div>
+
+      {/* File picker */}
+      <label className="flex items-center gap-3 px-4 py-3 bg-ink border border-edge border-dashed rounded-xl cursor-pointer hover:border-violet-500/40 transition-colors">
+        <Upload size={16} className="text-dim shrink-0" />
+        <span className="text-soft text-sm flex-1 truncate">
+          {file ? file.name : "Click to select CSV file…"}
+        </span>
+        {file && (
+          <button
+            onClick={e => { e.preventDefault(); setFile(null); }}
+            className="text-dim hover:text-rose-400 transition-colors"
+          >
+            <X size={14} />
+          </button>
+        )}
+        <input
+          type="file"
+          accept=".csv,text/csv"
+          className="hidden"
+          onChange={e => { setFile(e.target.files[0] || null); setResult(null); setErr(""); }}
+        />
+      </label>
+
+      {err && <p className="text-rose-400 text-xs">{err}</p>}
+
+      {result && (
+        <div className="flex items-start gap-2 bg-jade-500/10 border border-jade-500/20 rounded-xl px-4 py-3">
+          <CheckCircle2 size={14} className="text-jade-400 shrink-0 mt-0.5" />
+          <div className="text-xs text-jade-300">
+            {mode === "create"
+              ? `Created: ${result.created ?? 0}  Skipped: ${result.skipped ?? 0}`
+              : `Deleted: ${result.deleted ?? 0}`}
+            {result.errors?.length > 0 && (
+              <p className="text-amber-400 mt-1">Errors: {result.errors.join("; ")}</p>
+            )}
+          </div>
+        </div>
+      )}
+
+      <Button onClick={handleSubmit} loading={saving} variant={mode === "delete" ? "danger" : "primary"}>
+        {mode === "create" ? <><Upload size={14} /> Upload & Create</> : <><Trash2 size={14} /> Upload & Delete</>}
+      </Button>
+    </div>
+  );
+}
+
+// ── Create Course Modal ───────────────────────────────────────────────────────
+
+function CreateCourseModal({ professors, classrooms, onClose, onCreated }) {
+  const [form, setForm] = useState({
+    name: "", _id: "", slot: "A",
+    department: "CSE",
+    venue: "",
+    startDate: "", endDate: "",
+    instructors: [], tas: [],
+  });
+  const [saving, setSaving] = useState(false);
+  const [err,    setErr]    = useState("");
+
+  const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+
+  const togglePerson = (id, field) => {
+    setForm(f => ({
+      ...f,
+      [field]: f[field].includes(id) ? f[field].filter(x => x !== id) : [...f[field], id],
+    }));
+  };
+
+  const handleSave = async () => {
+    if (!form.name.trim())    { setErr("Course name is required."); return; }
+    if (!form.department.trim()){ setErr("Department is required."); return; }
+    if (!form.venue.trim())   { setErr("Venue (classroom ID) is required."); return; }
+    if (!form.startDate || !form.endDate) { setErr("Start and end dates are required."); return; }
+    if (form.instructors.length === 0) { setErr("At least one instructor is required."); return; }
+    setSaving(true);
+    setErr("");
+    try {
+      const payload = { ...form };
+      if (!payload._id.trim()) delete payload._id;
+      const res = await createCourse(payload);
+      onCreated(res.data);
+      onClose();
+    } catch (e) {
+      setErr(e.response?.data?.error || "Failed to create course.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Modal title="Create New Course" onClose={onClose} maxWidth="max-w-2xl">
+      <div className="p-5 space-y-4">
+        {err && (
+          <div className="flex items-center gap-2 bg-rose-500/10 border border-rose-500/20 rounded-xl px-4 py-3">
+            <AlertTriangle size={13} className="text-rose-400 shrink-0" />
+            <p className="text-rose-300 text-xs">{err}</p>
+          </div>
+        )}
+
+        <div className="grid grid-cols-2 gap-3">
+          <div className="col-span-2 space-y-1.5">
+            <label className="text-xs text-soft font-medium">Course Name *</label>
+            <input value={form.name} onChange={e => set("name", e.target.value)}
+              placeholder="e.g. Data Structures and Algorithms"
+              className="w-full bg-ink border border-edge rounded-xl text-sm text-snow placeholder:text-dim
+                focus:outline-none focus:border-azure-500 transition-all px-4 py-2.5" />
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-xs text-soft font-medium">Course ID <span className="text-dim">(optional)</span></label>
+            <input value={form._id} onChange={e => set("_id", e.target.value)}
+              placeholder="Auto-generated if blank"
+              className="w-full bg-ink border border-edge rounded-xl text-sm text-snow placeholder:text-dim
+                focus:outline-none focus:border-azure-500 transition-all px-4 py-2.5 font-mono" />
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-xs text-soft font-medium">Department *</label>
+            <input value={form.department} onChange={e => set("department", e.target.value)}
+              placeholder="e.g. CSE"
+              className="w-full bg-ink border border-edge rounded-xl text-sm text-snow placeholder:text-dim
+                focus:outline-none focus:border-azure-500 transition-all px-4 py-2.5" />
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-xs text-soft font-medium">Slot *</label>
+            <select value={form.slot} onChange={e => set("slot", e.target.value)}
+              className="w-full bg-ink border border-edge rounded-xl text-sm text-snow px-4 py-2.5
+                focus:outline-none focus:border-azure-500 transition-all appearance-none">
+              {SLOTS.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-xs text-soft font-medium">Venue (Classroom ID) *</label>
+            <input value={form.venue} onChange={e => set("venue", e.target.value)}
+              placeholder="e.g. LH-1"
+              list="classroom-list"
+              className="w-full bg-ink border border-edge rounded-xl text-sm text-snow placeholder:text-dim
+                focus:outline-none focus:border-azure-500 transition-all px-4 py-2.5" />
+            <datalist id="classroom-list">
+              {classrooms.map(c => <option key={c._id} value={c._id} />)}
+            </datalist>
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-xs text-soft font-medium">Start Date *</label>
+            <input type="date" value={form.startDate} onChange={e => set("startDate", e.target.value)}
+              className="w-full bg-ink border border-edge rounded-xl text-sm text-snow px-4 py-2.5
+                focus:outline-none focus:border-azure-500 transition-all" />
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-xs text-soft font-medium">End Date *</label>
+            <input type="date" value={form.endDate} onChange={e => set("endDate", e.target.value)}
+              className="w-full bg-ink border border-edge rounded-xl text-sm text-snow px-4 py-2.5
+                focus:outline-none focus:border-azure-500 transition-all" />
+          </div>
+        </div>
+
+        {/* Instructor picker */}
+        <div className="space-y-1.5">
+          <label className="text-xs text-soft font-medium">Instructors *</label>
+          <div className="max-h-36 overflow-y-auto divide-y divide-edge border border-edge rounded-xl">
+            {professors.map(p => (
+              <label key={p.id || p._id} className="flex items-center gap-3 px-4 py-2.5 hover:bg-white/2 cursor-pointer">
+                <input type="checkbox"
+                  checked={form.instructors.includes(String(p.id || p._id))}
+                  onChange={() => togglePerson(String(p.id || p._id), "instructors")}
+                  className="accent-blue-500" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-snow text-xs font-medium">{p.name}</p>
+                  <p className="text-dim text-xs font-mono truncate">{p.email}</p>
+                </div>
+              </label>
+            ))}
+            {professors.length === 0 && (
+              <p className="text-soft text-xs text-center py-4">No professors found.</p>
+            )}
+          </div>
+        </div>
+
+        {/* TA picker (professors not already assigned as instructor) */}
+        <div className="space-y-1.5">
+          <label className="text-xs text-soft font-medium">Teaching Assistants <span className="text-dim">(optional)</span></label>
+          <div className="max-h-28 overflow-y-auto divide-y divide-edge border border-edge rounded-xl">
+            {professors
+              .filter(p => !form.instructors.includes(String(p.id || p._id)))
+              .map(p => (
+                <label key={p.id || p._id} className="flex items-center gap-3 px-4 py-2.5 hover:bg-white/2 cursor-pointer">
+                  <input type="checkbox"
+                    checked={form.tas.includes(String(p.id || p._id))}
+                    onChange={() => togglePerson(String(p.id || p._id), "tas")}
+                    className="accent-violet-500" />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-snow text-xs font-medium">{p.name}</p>
+                    <p className="text-dim text-xs font-mono truncate">{p.email}</p>
+                  </div>
+                </label>
+              ))}
+            {professors.filter(p => !form.instructors.includes(String(p.id || p._id))).length === 0 && (
+              <p className="text-soft text-xs text-center py-4">
+                {form.instructors.length === 0 ? "Assign instructors first." : "All professors assigned as instructors."}
+              </p>
+            )}
+          </div>
+        </div>
+
+        <div className="flex gap-2 pt-2">
+          <Button onClick={handleSave} loading={saving}>
+            <CheckCircle2 size={14} /> Create Course
+          </Button>
+          <Button variant="secondary" onClick={onClose}>Cancel</Button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+// ── Enroll Students Modal ─────────────────────────────────────────────────────
+
+function EnrollStudentsModal({ course, allStudents, onClose, onEnrolled }) {
+  const [enrolled,  setEnrolled]  = useState(new Set());
+  const [selected,  setSelected]  = useState(new Set());
+  const [query,     setQuery]     = useState("");
+  const [loading,   setLoading]   = useState(true);
+  const [saving,    setSaving]    = useState(false);
+  const [err,       setErr]       = useState("");
+
+  useEffect(() => {
+    getCourseEnrolled(course.id || course._id)
+      .then(r => setEnrolled(new Set(r.data.map(s => String(s.id || s._id)))))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [course]);
+
+  const filtered = allStudents.filter(s =>
+    (s.name || "").toLowerCase().includes(query.toLowerCase()) ||
+    String(s.id || s._id).toLowerCase().includes(query.toLowerCase()) ||
+    (s.email || "").toLowerCase().includes(query.toLowerCase())
+  );
+
+  const handleEnroll = async () => {
+    if (selected.size === 0) return;
+    setSaving(true);
+    setErr("");
+    try {
+      // FIXED: backend expects { course, student_ids }
+      await enrollBulk({
+        course:      course.id || course._id,
+        student_ids: Array.from(selected),
+      });
+      setEnrolled(e => new Set([...e, ...selected]));
+      setSelected(new Set());
+      onEnrolled();
+    } catch (e) {
+      setErr(e.response?.data?.error || "Failed to enroll.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleUnenroll = async (studentId) => {
+    try {
+      await unenrollStudent({ student: studentId, course: course.id || course._id });
+      setEnrolled(e => { const n = new Set(e); n.delete(String(studentId)); return n; });
+      onEnrolled();
+    } catch {}
+  };
+
+  return (
+    <Modal title="Enroll Students" subtitle={course.name} onClose={onClose}>
+      <div className="p-5 space-y-4">
+        {err && <p className="text-rose-400 text-xs">{err}</p>}
+
+        <div className="relative">
+          <Search size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-dim" />
+          <input value={query} onChange={e => setQuery(e.target.value)}
+            placeholder="Search students…"
+            className="w-full bg-ink border border-edge rounded-xl text-sm text-snow placeholder:text-dim
+              focus:outline-none focus:border-azure-500 transition-all pl-10 pr-4 py-2.5" />
+        </div>
+
+        {loading ? (
+          <div className="flex justify-center py-8"><Spinner /></div>
+        ) : (
+          <div className="divide-y divide-edge border border-edge rounded-xl max-h-72 overflow-y-auto">
+            {filtered.length === 0 ? (
+              <p className="text-soft text-xs text-center py-6">No students found.</p>
+            ) : filtered.map(s => {
+              const id         = String(s.id || s._id);
+              const isEnrolled = enrolled.has(id);
+              const isSelected = selected.has(id);
+              return (
+                <div key={id} className="flex items-center gap-3 px-4 py-3 hover:bg-white/2 transition-colors">
+                  {!isEnrolled ? (
+                    <input type="checkbox" checked={isSelected}
+                      onChange={() => {
+                        setSelected(sel => {
+                          const n = new Set(sel);
+                          n.has(id) ? n.delete(id) : n.add(id);
+                          return n;
+                        });
+                      }}
+                      className="accent-blue-500 shrink-0" />
+                  ) : (
+                    <CheckCircle2 size={14} className="text-jade-400 shrink-0" />
+                  )}
+                  <div className="flex-1 min-w-0">
+                    <p className="text-snow text-xs font-medium">{s.name}</p>
+                    <p className="text-dim text-xs font-mono truncate">{id}</p>
+                  </div>
+                  {isEnrolled ? (
+                    <button onClick={() => handleUnenroll(id)}
+                      className="text-dim hover:text-rose-400 transition-colors text-xs px-2 py-1 rounded-lg hover:bg-rose-500/10">
+                      Remove
+                    </button>
+                  ) : (
+                    <span className="text-dim text-xs">Not enrolled</span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {selected.size > 0 && (
+          <Button onClick={handleEnroll} loading={saving}>
+            <UserPlus size={14} /> Enroll {selected.size} Student{selected.size !== 1 ? "s" : ""}
+          </Button>
+        )}
+      </div>
+    </Modal>
+  );
+}
+
+// ── Course Analytics Modal ────────────────────────────────────────────────────
+
+function CourseAnalyticsModal({ course, onClose }) {
+  const [data,    setData]    = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [err,     setErr]     = useState(null);
+  const [query,   setQuery]   = useState("");
+
+  useEffect(() => {
+    getCourseStudentStats(course.id || course._id)
+      .then(r => setData(r.data))
+      .catch(() => setErr("Could not load analytics."))
+      .finally(() => setLoading(false));
+  }, [course]);
+
+  const filtered = (data?.studentStats || []).filter(s =>
+    (s.name || "").toLowerCase().includes(query.toLowerCase()) ||
+    String(s.student_id).toLowerCase().includes(query.toLowerCase())
+  );
+
+  return (
+    <Modal title="Course Analytics" subtitle={`${course.name} · lecture-based`} onClose={onClose}>
+      <div className="p-5 space-y-4">
+        {data && (
+          <div className="grid grid-cols-3 gap-3">
+            {[
+              { label: "Lectures Held", value: data.totalLectures },
+              { label: "Enrolled",      value: data.enrolled      },
+              {
+                label: "Avg Rate",
+                value: data.studentStats?.length
+                  ? `${(data.studentStats.reduce((s,x) => s + x.attendancePct, 0) / data.studentStats.length).toFixed(1)}%`
+                  : "—",
+              },
+            ].map((s, i) => (
+              <div key={i} className="bg-ink border border-edge rounded-xl p-3 text-center">
+                <p className="text-soft text-xs uppercase tracking-widest mb-0.5">{s.label}</p>
+                <p className="text-snow text-lg font-bold">{s.value}</p>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {loading ? (
+          <div className="flex justify-center py-8"><Spinner /></div>
+        ) : err ? (
+          <p className="text-rose-400 text-sm text-center">{err}</p>
+        ) : (
+          <>
+            <div className="relative">
+              <Search size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-dim" />
+              <input value={query} onChange={e => setQuery(e.target.value)}
+                placeholder="Search students…"
+                className="w-full bg-ink border border-edge rounded-xl text-sm text-snow placeholder:text-dim
+                  focus:outline-none focus:border-azure-500 transition-all pl-10 pr-4 py-2.5" />
+            </div>
+
+            <div className="divide-y divide-edge border border-edge rounded-xl max-h-80 overflow-y-auto">
+              {filtered.length === 0 ? (
+                <p className="text-soft text-xs text-center py-6">No students found.</p>
+              ) : filtered.map((s, i) => (
+                <div key={i} className="flex items-center gap-3 px-4 py-3 hover:bg-white/2 transition-colors">
+                  <div className="w-7 h-7 rounded-lg bg-azure-500/15 flex items-center justify-center shrink-0">
+                    <span className="text-azure-400 text-xs font-bold">{(s.name || "?").charAt(0).toUpperCase()}</span>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-snow text-xs font-medium">{s.name}</p>
+                    <p className="text-dim text-xs font-mono">{s.attended}/{s.totalLectures} lectures</p>
+                  </div>
+                  <div className="flex items-center gap-3 shrink-0">
+                    <div className="w-20"><ProgressBar value={s.attendancePct} max={100} /></div>
+                    <AttendancePct value={s.attendancePct} small />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+      </div>
+    </Modal>
+  );
+}
+
+// ── Course Row ────────────────────────────────────────────────────────────────
+
+function CourseRow({ course, allStudents, colorIdx, onDelete, onRefresh }) {
+  const [open,     setOpen]     = useState(false);
+  const [modal,    setModal]    = useState(null);
+  const [deleting, setDeleting] = useState(false);
+
+  const handleDelete = async () => {
+    if (!window.confirm(`Delete "${course.name}"? This cannot be undone.`)) return;
+    setDeleting(true);
+    try {
+      await deleteCourse(course.id || course._id);
+      onDelete(course.id || course._id);
+    } catch {
+      setDeleting(false);
+    }
+  };
+
+  return (
+    <>
+      <div className="bg-card border border-edge rounded-2xl overflow-hidden animate-slide-up">
+        <div className={`h-1 ${COURSE_COLORS[colorIdx % COURSE_COLORS.length]}`} />
+        <div className="px-5 py-4">
+          <div className="flex items-start justify-between gap-4">
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <h3 className="text-snow font-semibold text-sm">{course.name}</h3>
+                <Badge label={`Slot ${course.slot || "—"}`} variant="default" />
+                <span className="text-dim text-xs font-mono">{course.id || course._id}</span>
+              </div>
+              <p className="text-soft text-xs font-mono mt-0.5">
+                {course.department} · {course.venue || course.classroom || "—"} · {course.enrolled ?? "—"} enrolled
+              </p>
+              <p className="text-dim text-xs mt-0.5">
+                {course.instructorNames?.join(", ") || "—"}
+              </p>
+              <p className="text-dim text-xs">
+                {fmtDate(course.startDate)} → {fmtDate(course.endDate)}
+              </p>
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0">
+              <Button size="xs" variant="secondary" onClick={() => setModal("analytics")}>
+                <Eye size={12} /> Analytics
+              </Button>
+              <Button size="xs" variant="jade" onClick={() => setModal("enroll")}>
+                <UserPlus size={12} /> Enroll
+              </Button>
+              <button onClick={handleDelete} disabled={deleting}
+                className="text-dim hover:text-rose-400 transition-colors disabled:opacity-40 p-1.5 rounded-lg hover:bg-rose-500/10">
+                {deleting ? <Spinner size={13} /> : <Trash2 size={13} />}
+              </button>
+              <button onClick={() => setOpen(o => !o)}
+                className="text-dim hover:text-snow transition-colors p-1.5 rounded-lg hover:bg-white/5">
+                {open ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+              </button>
+            </div>
+          </div>
+
+          {/* Expanded details */}
+          {open && (
+            <div className="mt-4 pt-4 border-t border-edge grid grid-cols-2 gap-4 text-xs">
+              <div>
+                <p className="text-soft uppercase tracking-widest mb-1">Total Lectures</p>
+                <p className="text-snow font-mono">{course.lectures?.length ?? "—"}</p>
+              </div>
+              <div>
+                <p className="text-soft uppercase tracking-widest mb-1">Schedules</p>
+                <p className="text-snow font-mono">{course.schedules?.length ?? "—"}</p>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {modal === "analytics" && (
+        <CourseAnalyticsModal course={course} onClose={() => setModal(null)} />
+      )}
+      {modal === "enroll" && (
+        <EnrollStudentsModal
+          course={course}
+          allStudents={allStudents}
+          onClose={() => setModal(null)}
+          onEnrolled={onRefresh}
+        />
+      )}
+    </>
+  );
+}
+
+// ── Main page ─────────────────────────────────────────────────────────────────
+
+export default function AdminCourses() {
+  const [courses,    setCourses]    = useState([]);
+  const [professors, setProfessors] = useState([]);
+  const [students,   setStudents]   = useState([]);
+  const [classrooms, setClassrooms] = useState([]);
+  const [loading,    setLoading]    = useState(true);
+  const [query,      setQuery]      = useState("");
+  const [showCreate, setShowCreate] = useState(false);
+  const [showCsv,    setShowCsv]    = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [cRes, uRes] = await Promise.all([
+        getAllCourses(),
+        getAllUsers(),
+      ]);
+      setCourses(cRes.data);
+
+      const users = uRes.data;
+      setProfessors(users.filter(u => u.role === "prof"));
+      setStudents(users.filter(u => u.role === "student"));
+
+      // Load classrooms via admin endpoint
+      try {
+        const clRes = await import("../api/client").then(m => m.default.get("/admin/classrooms"));
+        setClassrooms(clRes.data);
+      } catch {}
+    } catch {}
+    finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const filtered = courses.filter(c =>
+    (c.name || "").toLowerCase().includes(query.toLowerCase()) ||
+    String(c.id || c._id).toLowerCase().includes(query.toLowerCase())
+  );
+
+  return (
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="animate-slide-up flex items-center justify-between">
+        <div>
+          <h1 className="text-snow text-2xl font-bold tracking-tight">Courses</h1>
+          <p className="text-soft text-sm mt-1">
+            Create courses, enroll students, and view lecture-based analytics.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button onClick={() => setShowCsv(v => !v)}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-violet-500/15 text-violet-400 text-xs border border-violet-500/20 hover:bg-violet-500/25 transition-colors">
+            <Upload size={13} /> CSV
+          </button>
+          <button onClick={load} className="text-dim hover:text-snow p-2 rounded-xl hover:bg-white/5 transition-colors">
+            <RefreshCw size={14} />
+          </button>
+          <Button onClick={() => setShowCreate(true)}>
+            <Plus size={14} /> New Course
+          </Button>
+        </div>
+      </div>
+
+      {/* CSV panel */}
+      {showCsv && <CsvPanel onDone={load} />}
+
+      {/* Search */}
+      <div className="relative max-w-sm animate-slide-up" style={{ animationDelay: "60ms" }}>
+        <Search size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-dim" />
+        <input value={query} onChange={e => setQuery(e.target.value)}
+          placeholder="Search courses…"
+          className="w-full bg-card border border-edge rounded-xl text-sm text-snow placeholder:text-dim
+            focus:outline-none focus:border-azure-500 transition-all pl-10 pr-4 py-2.5" />
+      </div>
+
+      {/* Courses list */}
+      {loading ? (
+        <div className="flex justify-center py-20"><Spinner size={28} /></div>
+      ) : filtered.length === 0 ? (
+        <Empty icon={BookOpen} title="No courses found"
+          sub={courses.length === 0 ? "Create your first course." : "No courses match your search."} />
+      ) : (
+        <div className="space-y-4">
+          {filtered.map((c, i) => (
+            <CourseRow
+              key={c.id || c._id}
+              course={c}
+              allStudents={students}
+              colorIdx={i}
+              onDelete={id => setCourses(cs => cs.filter(x => (x.id || x._id) !== id))}
+              onRefresh={load}
+            />
+          ))}
+        </div>
+      )}
+
+      {showCreate && (
+        <CreateCourseModal
+          professors={professors}
+          classrooms={classrooms}
+          onClose={() => setShowCreate(false)}
+          onCreated={c => setCourses(cs => [c, ...cs])}
+        />
+      )}
+    </div>
+  );
+}
+
+---
+frontend/src/pages/AdminDashboard.js
+---
+import { useState, useEffect, useCallback } from "react";
+import {
+  getAdminStats, getAllCourses, createCourse, deleteCourse,
+  getAllUsers, createProfessor, createStudent, deleteProfessor, deleteStudent,
+  enrollStudent, unenrollStudent, getCourseEnrolled,
+  getAdminStudentAnalytics, addTA, removeTA,
+} from "../api/client";
+import API from "../api/client";
+import {
+  Shield, Activity, Users, AlertTriangle, CheckCircle2, Server,
+  Plus, Trash2, BookOpen, ChevronDown, ChevronUp, X,
+  Search, BarChart3, GraduationCap, UserPlus,
+} from "lucide-react";
+import { Badge, Spinner, ProgressBar, AttendancePct } from "../components/UI";
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function formatIST(utcStr) {
+  if (!utcStr) return "—";
+  const s = utcStr.endsWith("Z") || utcStr.includes("+") ? utcStr : utcStr + "Z";
+  return new Date(s).toLocaleString("en-IN", {
+    timeZone: "Asia/Kolkata", day: "2-digit", month: "short",
+    hour: "2-digit", minute: "2-digit",
+  });
+}
+
+const SLOTS = ["A","B","C","D","E","F","G","P","Q","R","S","W","X","Y","Z"];
+const ROLE_COLORS = {
+  admin:   "text-rose-400 bg-rose-500/15 border-rose-500/20",
+  prof:    "text-azure-400 bg-azure-500/15 border-azure-500/20",
+  student: "text-jade-400 bg-jade-500/15 border-jade-500/20",
+  ta:      "text-amber-400 bg-amber-500/15 border-amber-500/20",
+};
+
+// ── Student Analytics Modal (bucket-backed) ───────────────────────────────────
+function StudentAnalyticsModal({ student, onClose }) {
+  const [data,    setData]    = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    getAdminStudentAnalytics(student.id || student._id)
+      .then(r => setData(r.data))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [student]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      style={{ background: "rgba(0,0,0,0.75)", backdropFilter: "blur(4px)" }}
+      onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="bg-card border border-edge rounded-2xl w-full max-w-xl shadow-float animate-slide-up overflow-hidden">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-edge">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-azure-500/15 border border-azure-500/20 flex items-center justify-center">
+              <BarChart3 size={16} className="text-azure-400" />
+            </div>
+            <div>
+              <p className="text-snow font-semibold text-sm">{student.name}</p>
+              <p className="text-soft text-xs font-mono">
+                {student.email} · {data?.cached ? "from cache" : "live data"}
+              </p>
+            </div>
+          </div>
+          <button onClick={onClose}
+            className="w-8 h-8 rounded-xl bg-edge flex items-center justify-center text-soft hover:text-snow transition-colors">
+            <X size={15} />
+          </button>
+        </div>
+        <div className="px-6 py-5">
+          {loading ? (
+            <div className="flex items-center justify-center h-40"><Spinner size={24} /></div>
+          ) : !data?.courses?.length ? (
+            <p className="text-soft text-sm text-center py-10">No enrolled courses.</p>
+          ) : (
+            <div className="space-y-3 max-h-96 overflow-y-auto">
+              {data.courses.map((c, i) => (
+                <div key={i} className="p-3 rounded-xl bg-ink border border-edge">
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="text-snow text-sm font-medium">{c.courseName}</p>
+                    <AttendancePct value={c.attendancePct} />
+                  </div>
+                  <ProgressBar value={c.attendancePct} max={100} size="sm" />
+                  <p className="text-dim text-xs font-mono mt-1.5">
+                    {c.attended} / {c.sessionsHeld} lectures attended · {c.totalLectures} scheduled
+                  </p>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── TA Management Panel (within expanded course) ──────────────────────────────
+function TaPanel({ courseId, currentTas, onRefresh }) {
+  const [newTaId,   setNewTaId]   = useState("");
+  const [adding,    setAdding]    = useState(false);
+  const [removing,  setRemoving]  = useState(null);
+  const [err,       setErr]       = useState("");
+
+  const handleAdd = async () => {
+    if (!newTaId.trim()) return setErr("Enter a student ID");
+    setAdding(true); setErr("");
+    try {
+      await addTA(courseId, newTaId.trim());
+      setNewTaId("");
+      onRefresh();
+    } catch (e) {
+      setErr(e.response?.data?.error || "Failed to add TA");
+    } finally { setAdding(false); }
+  };
+
+  const handleRemove = async (studentId) => {
+    setRemoving(studentId);
+    try {
+      await removeTA(courseId, studentId);
+      onRefresh();
+    } catch {} finally { setRemoving(null); }
+  };
+
+  return (
+    <div className="space-y-2">
+      <p className="text-soft text-xs font-medium uppercase tracking-wider">Teaching Assistants</p>
+      {(currentTas || []).length === 0 ? (
+        <p className="text-dim text-xs">No TAs assigned.</p>
+      ) : (
+        <div className="space-y-1">
+          {currentTas.map(taId => (
+            <div key={taId} className="flex items-center gap-2">
+              <span className="text-amber-400 text-xs font-mono flex-1">{taId}</span>
+              <button onClick={() => handleRemove(taId)} disabled={removing === taId}
+                className="text-dim hover:text-rose-400 transition-colors">
+                {removing === taId ? <Spinner size={11} /> : <X size={12} />}
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="flex gap-2 mt-2">
+        <input value={newTaId} onChange={e => setNewTaId(e.target.value)}
+          placeholder="Student ID to add as TA"
+          className="flex-1 bg-card border border-edge rounded-xl text-xs text-snow px-3 py-1.5
+            focus:outline-none focus:border-amber-500 placeholder:text-dim transition-all" />
+        <button onClick={handleAdd} disabled={adding}
+          className="px-3 py-1.5 rounded-xl bg-amber-500/15 text-amber-400 text-xs border border-amber-500/20
+            hover:bg-amber-500/25 transition-colors disabled:opacity-50 flex items-center gap-1">
+          {adding ? <Spinner size={11} /> : <UserPlus size={12} />}
+          Add TA
+        </button>
+      </div>
+      {err && <p className="text-rose-400 text-xs">{err}</p>}
+    </div>
+  );
+}
+
+// ── Courses Panel ─────────────────────────────────────────────────────────────
+function CoursesPanel() {
+  const [courses,   setCourses]   = useState([]);
+  const [loading,   setLoading]   = useState(true);
+  const [expanded,  setExpanded]  = useState(null);
+  const [enrolled,  setEnrolled]  = useState({});
+  const [enrollId,  setEnrollId]  = useState("");
+  const [enrolling, setEnrolling] = useState(false);
+  const [enrollErr, setEnrollErr] = useState("");
+  const [showCreate, setShowCreate] = useState(false);
+  const [createForm, setCreateForm] = useState({
+    _id:"", name:"", department:"", slot:"A", venue:"", startDate:"", endDate:"", instructors:"", tas:"",
+  });
+  const [creating, setCreating] = useState(false);
+  const [createErr, setCreateErr] = useState("");
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const r = await getAllCourses();
+      // getAllCourses returns array directly
+      setCourses(Array.isArray(r.data) ? r.data : []);
+    } catch (e) {
+      console.error("getAllCourses failed:", e);
+      setCourses([]);
+    } finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const loadEnrolled = async (courseId) => {
+    try {
+      const r = await getCourseEnrolled(courseId);
+      setEnrolled(e => ({ ...e, [courseId]: r.data }));
+    } catch {}
+  };
+
+  const handleExpand = (courseId) => {
+    if (expanded === courseId) { setExpanded(null); return; }
+    setExpanded(courseId);
+    setEnrollErr("");
+    if (!enrolled[courseId]) loadEnrolled(courseId);
+  };
+
+  const handleEnroll = async (courseId) => {
+    if (!enrollId.trim()) return setEnrollErr("Enter a student ID");
+    setEnrolling(true); setEnrollErr("");
+    try {
+      await enrollStudent({ student: enrollId.trim(), course: courseId });
+      setEnrollId("");
+      await loadEnrolled(courseId);
+    } catch (e) {
+      setEnrollErr(e.response?.data?.error || "Enrollment failed.");
+    } finally { setEnrolling(false); }
+  };
+
+  const handleUnenroll = async (studentId, courseId) => {
+    try {
+      await unenrollStudent({ student: studentId, course: courseId });
+      await loadEnrolled(courseId);
+    } catch {}
+  };
+
+  const handleCreate = async () => {
+    setCreateErr("");
+    const f = createForm;
+    if (!f.name || !f.department || !f.venue || !f.startDate || !f.endDate) {
+      return setCreateErr("Name, department, venue, start and end dates are required.");
+    }
+    setCreating(true);
+    try {
+      await createCourse({
+        ...f,
+        _id:         f._id || undefined,
+        instructors: f.instructors ? f.instructors.split(",").map(s=>s.trim()).filter(Boolean) : [],
+        tas:         f.tas         ? f.tas.split(",").map(s=>s.trim()).filter(Boolean)         : [],
+        startDate:   new Date(f.startDate).toISOString(),
+        endDate:     new Date(f.endDate).toISOString(),
+      });
+      setShowCreate(false);
+      setCreateForm({ _id:"",name:"",department:"",slot:"A",venue:"",startDate:"",endDate:"",instructors:"",tas:"" });
+      await load();
+    } catch (e) {
+      setCreateErr(e.response?.data?.error || "Failed to create course.");
+    } finally { setCreating(false); }
+  };
+
+  if (loading) return <div className="flex justify-center py-10"><Spinner size={20} /></div>;
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <p className="text-soft text-xs font-mono">{courses.length} courses</p>
+        <button onClick={() => setShowCreate(v => !v)}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-azure-500/15 text-azure-400 text-xs
+            border border-azure-500/20 hover:bg-azure-500/25 transition-colors">
+          <Plus size={12} /> {showCreate ? "Cancel" : "New Course"}
+        </button>
+      </div>
+
+      {showCreate && (
+        <div className="border border-edge rounded-xl p-4 bg-ink animate-slide-up space-y-3">
+          <p className="text-snow text-xs font-semibold">Create New Course</p>
+          <div className="grid grid-cols-2 gap-2">
+            {[
+              ["Course ID (optional)", "_id", "text", "CS101"],
+              ["Course Name *", "name", "text", "Introduction to CS"],
+              ["Department *", "department", "text", "CSE"],
+              ["Venue *", "venue", "text", "TT101"],
+              ["Start Date *", "startDate", "date", ""],
+              ["End Date *", "endDate", "date", ""],
+              ["Instructor IDs (comma-sep)", "instructors", "text", "prof01"],
+              ["TA IDs (comma-sep)", "tas", "text", "20CSE001"],
+            ].map(([lbl, key, type, placeholder]) => (
+              <div key={key} className="space-y-1">
+                <label className="text-xs text-soft">{lbl}</label>
+                <input type={type} value={createForm[key]} placeholder={placeholder}
+                  onChange={e => setCreateForm(f => ({ ...f, [key]: e.target.value }))}
+                  className="w-full bg-card border border-edge rounded-xl text-xs text-snow px-3 py-1.5
+                    focus:outline-none focus:border-azure-500 transition-all placeholder:text-dim" />
+              </div>
+            ))}
+            <div className="space-y-1">
+              <label className="text-xs text-soft">Slot</label>
+              <select value={createForm.slot}
+                onChange={e => setCreateForm(f => ({ ...f, slot: e.target.value }))}
+                className="w-full bg-card border border-edge rounded-xl text-xs text-snow px-3 py-1.5
+                  focus:outline-none focus:border-azure-500 transition-all appearance-none">
+                {SLOTS.map(s => <option key={s} value={s}>{s}</option>)}
+              </select>
+            </div>
+          </div>
+          {createErr && <p className="text-rose-400 text-xs">{createErr}</p>}
+          <button onClick={handleCreate} disabled={creating}
+            className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-azure-500/15 text-azure-400 text-xs font-medium
+              border border-azure-500/20 hover:bg-azure-500/25 transition-colors disabled:opacity-50">
+            {creating ? <Spinner size={12} /> : <Plus size={12} />}
+            {creating ? "Creating…" : "Create Course"}
+          </button>
+        </div>
+      )}
+
+      <div className="space-y-2 max-h-[500px] overflow-y-auto">
+        {courses.length === 0 ? (
+          <p className="text-soft text-sm text-center py-8">No courses yet.</p>
+        ) : courses.map(c => {
+          const courseId = c._id || c.id;
+          return (
+            <div key={courseId} className="border border-edge rounded-xl overflow-hidden">
+              <button onClick={() => handleExpand(courseId)}
+                className="w-full flex items-center gap-3 px-4 py-3 bg-ink hover:bg-white/2 transition-colors text-left">
+                <div className="w-7 h-7 rounded-lg bg-azure-500/15 border border-azure-500/20 flex items-center justify-center shrink-0">
+                  <BookOpen size={13} className="text-azure-400" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-snow text-xs font-medium truncate">{c.name}</p>
+                  <p className="text-dim text-xs font-mono">{courseId} · Slot {c.slot} · {c.enrolled || 0} enrolled</p>
+                </div>
+                {expanded === courseId ? <ChevronUp size={14} className="text-dim" /> : <ChevronDown size={14} className="text-dim" />}
+              </button>
+
+              {expanded === courseId && (
+                <div className="px-4 pb-4 pt-2 border-t border-edge bg-ink space-y-4 animate-slide-up">
+                  {/* Enrolled students */}
+                  <div>
+                    <p className="text-soft text-xs font-medium uppercase tracking-wider mb-2">Enrolled Students</p>
+                    <div className="space-y-1 max-h-32 overflow-y-auto">
+                      {(enrolled[courseId] || []).length === 0 ? (
+                        <p className="text-dim text-xs">No students enrolled.</p>
+                      ) : (enrolled[courseId] || []).map(s => (
+                        <div key={s._id || s.id} className="flex items-center gap-2 py-0.5">
+                          <span className="text-snow text-xs flex-1 font-mono">{s._id || s.id} — {s.name}</span>
+                          <button onClick={() => handleUnenroll(s._id || s.id, courseId)}
+                            className="text-dim hover:text-rose-400 transition-colors">
+                            <X size={12} />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="flex gap-2 mt-2">
+                      <input value={enrollId} onChange={e => setEnrollId(e.target.value)}
+                        placeholder="Student ID to enroll"
+                        className="flex-1 bg-card border border-edge rounded-xl text-xs text-snow px-3 py-1.5
+                          focus:outline-none focus:border-azure-500 placeholder:text-dim transition-all" />
+                      <button onClick={() => handleEnroll(courseId)} disabled={enrolling}
+                        className="px-3 py-1.5 rounded-xl bg-jade-500/15 text-jade-400 text-xs border border-jade-500/20
+                          hover:bg-jade-500/25 transition-colors disabled:opacity-50">
+                        {enrolling ? <Spinner size={11} /> : "Enroll"}
+                      </button>
+                    </div>
+                    {enrollErr && <p className="text-rose-400 text-xs mt-1">{enrollErr}</p>}
+                  </div>
+
+                  {/* TA management */}
+                  <TaPanel
+                    courseId={courseId}
+                    currentTas={c.tas || []}
+                    onRefresh={load}
+                  />
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ── Users Panel ───────────────────────────────────────────────────────────────
+function UsersPanel() {
+  const [users,    setUsers]    = useState([]);
+  const [loading,  setLoading]  = useState(true);
+  const [query,    setQuery]    = useState("");
+  const [roleTab,  setRoleTab]  = useState("all");
+  const [showForm, setShowForm] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [deleting, setDeleting] = useState(null);
+  const [formErr,  setFormErr]  = useState("");
+  const [selectedStudent, setSelectedStudent] = useState(null);
+  const [form, setForm] = useState({ _id:"", name:"", email:"", password:"", role:"student" });
+
+  const load = useCallback(async () => {
+    try {
+      const r = await getAllUsers();
+      // getAllUsers returns array of users with role field
+      setUsers(Array.isArray(r.data) ? r.data : []);
+    } catch (e) {
+      console.error("getAllUsers failed:", e);
+      setUsers([]);
+    } finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const filtered = users.filter(u => {
+    if (roleTab !== "all" && u.role !== roleTab) return false;
+    const q = query.toLowerCase();
+    return (u.name || "").toLowerCase().includes(q) ||
+           (u.email || "").toLowerCase().includes(q) ||
+           (u.id || u._id || "").toLowerCase().includes(q);
+  });
+
+  const handleCreate = async () => {
+    setFormErr("");
+    if (!form._id || !form.name || !form.email || !form.password) {
+      return setFormErr("All fields required.");
+    }
+    setCreating(true);
+    try {
+      if (form.role === "prof") await createProfessor({ ...form });
+      else await createStudent({ ...form });
+      setForm({ _id:"", name:"", email:"", password:"", role:"student" });
+      setShowForm(false);
+      await load();
+    } catch (e) {
+      setFormErr(e.response?.data?.error || "Creation failed.");
+    } finally { setCreating(false); }
+  };
+
+  const handleDelete = async (u) => {
+    setDeleting(u.id || u._id);
+    try {
+      if (u.role === "prof" || u.role === "admin") await deleteProfessor(u.id || u._id);
+      else await deleteStudent(u.id || u._id);
+      await load();
+    } catch {} finally { setDeleting(null); }
+  };
+
+  if (loading) return <div className="flex justify-center py-10"><Spinner size={20} /></div>;
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2 flex-wrap">
+        <div className="relative flex-1 min-w-32">
+          <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-dim" />
+          <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Search users…"
+            className="w-full bg-card border border-edge rounded-xl text-xs text-snow pl-8 pr-3 py-2
+              focus:outline-none focus:border-azure-500 transition-all placeholder:text-dim" />
+        </div>
+        {["all","student","ta","prof","admin"].map(r => (
+          <button key={r} onClick={() => setRoleTab(r)}
+            className={`px-3 py-1.5 rounded-xl text-xs font-medium transition-all border
+              ${roleTab === r ? "bg-azure-500/15 text-azure-400 border-azure-500/30" : "bg-card text-soft border-edge hover:text-snow"}`}>
+            {r.charAt(0).toUpperCase() + r.slice(1)}
+          </button>
+        ))}
+        <button onClick={() => setShowForm(v => !v)}
+          className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-jade-500/15 text-jade-400 text-xs
+            border border-jade-500/20 hover:bg-jade-500/25 transition-colors">
+          <Plus size={12} /> Add
+        </button>
+      </div>
+
+      {showForm && (
+        <div className="border border-edge rounded-xl p-4 bg-ink space-y-3 animate-slide-up">
+          <div className="grid grid-cols-2 gap-2">
+            {[["ID","_id","text"],["Name","name","text"],["Email","email","email"],["Password","password","password"]].map(([lbl,key,type]) => (
+              <div key={key} className="space-y-1">
+                <label className="text-xs text-soft">{lbl}</label>
+                <input type={type} value={form[key]}
+                  onChange={e => setForm(f => ({ ...f, [key]: e.target.value }))}
+                  className="w-full bg-card border border-edge rounded-xl text-xs text-snow px-3 py-1.5
+                    focus:outline-none focus:border-jade-500 transition-all" />
+              </div>
+            ))}
+            <div className="space-y-1">
+              <label className="text-xs text-soft">Role</label>
+              <select value={form.role} onChange={e => setForm(f => ({ ...f, role: e.target.value }))}
+                className="w-full bg-card border border-edge rounded-xl text-xs text-snow px-3 py-1.5
+                  focus:outline-none focus:border-jade-500 transition-all appearance-none">
+                <option value="student">Student</option>
+                <option value="prof">Professor</option>
+              </select>
+            </div>
+          </div>
+          {formErr && <p className="text-rose-400 text-xs">{formErr}</p>}
+          <div className="flex gap-2">
+            <button onClick={handleCreate} disabled={creating}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium
+                bg-jade-500/15 text-jade-400 border border-jade-500/30 hover:bg-jade-500/25 transition-colors disabled:opacity-50">
+              {creating ? <Spinner size={12} /> : <CheckCircle2 size={13} />}
+              {creating ? "Creating…" : "Create"}
+            </button>
+            <button onClick={() => { setShowForm(false); setFormErr(""); }}
+              className="px-3 py-1.5 rounded-lg text-xs bg-edge text-soft hover:text-snow transition-colors">
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div className="divide-y divide-edge rounded-xl border border-edge overflow-hidden max-h-80 overflow-y-auto">
+        {filtered.length === 0 ? (
+          <p className="text-soft text-sm text-center py-8">No users found.</p>
+        ) : filtered.map(u => {
+          const uid = u.id || u._id;
+          return (
+            <div key={uid} className="flex items-center gap-3 px-4 py-3 bg-ink hover:bg-white/2 transition-colors">
+              <div className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 border text-xs font-bold ${ROLE_COLORS[u.role] || ROLE_COLORS.student}`}>
+                {(u.name || uid).charAt(0).toUpperCase()}
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-snow text-xs font-medium truncate">{u.name}</p>
+                <p className="text-dim text-xs font-mono truncate">{u.email}</p>
+              </div>
+              <span className={`text-xs font-mono px-2 py-0.5 rounded-lg border ${ROLE_COLORS[u.role] || ROLE_COLORS.student}`}>
+                {u.role}
+              </span>
+              {(u.role === "student" || u.role === "ta") && (
+                <button onClick={() => setSelectedStudent(u)} title="View course analytics"
+                  className="text-dim hover:text-azure-400 transition-colors shrink-0">
+                  <BarChart3 size={13} />
+                </button>
+              )}
+              <button onClick={() => handleDelete(u)} disabled={deleting === uid}
+                className="text-dim hover:text-rose-400 transition-colors shrink-0 disabled:opacity-40">
+                {deleting === uid ? <Spinner size={13} /> : <Trash2 size={13} />}
+              </button>
+            </div>
+          );
+        })}
+      </div>
+      <p className="text-dim text-xs font-mono">{filtered.length} user{filtered.length !== 1 ? "s" : ""} shown</p>
+
+      {selectedStudent && (
+        <StudentAnalyticsModal student={selectedStudent} onClose={() => setSelectedStudent(null)} />
+      )}
+    </div>
+  );
+}
+
+// ── Sessions Panel ────────────────────────────────────────────────────────────
+function SessionsPanel() {
+  const [sessions, setSessions] = useState([]);
+  const [loading,  setLoading]  = useState(true);
+
+  useEffect(() => {
+    API.get("/admin/sessions")
+      .then(r => setSessions(r.data))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, []);
+
+  if (loading) return <div className="flex justify-center py-10"><Spinner size={20} /></div>;
+  if (!sessions.length) return <p className="text-soft text-sm text-center py-6">No sessions yet.</p>;
+
+  return (
+    <div className="space-y-2 max-h-72 overflow-y-auto">
+      {sessions.slice(0, 50).map(s => (
+        <div key={s.sessionUID} className="flex items-center gap-3 px-4 py-2.5 rounded-xl bg-ink border border-edge">
+          <Activity size={13} className={s.active ? "text-jade-400" : "text-dim"} />
+          <div className="flex-1 min-w-0">
+            <p className="text-snow text-xs font-mono truncate">{s.sessionUID}</p>
+            <p className="text-dim text-xs truncate">Course: {s.course_id}</p>
+          </div>
+          <div className="text-right shrink-0 space-y-0.5">
+            <p className="text-soft text-xs">{formatIST(s.timestamp)}</p>
+            <div className="flex items-center gap-1 justify-end">
+              <Badge label={s.method} variant={s.method === "BLE" ? "ble" : s.method === "QRCode" ? "qr" : "manual"} />
+              {s.active && <Badge label="LIVE" variant="live" />}
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── Expandable action card ────────────────────────────────────────────────────
+function ActionCard({ icon: Icon, title, subtitle, color, children }) {
+  const [open, setOpen] = useState(false);
+  const colorMap = {
+    azure:  { bg:"bg-azure-500/15",  border:"border-azure-500/20",  text:"text-azure-400"  },
+    jade:   { bg:"bg-jade-500/15",   border:"border-jade-500/20",   text:"text-jade-400"   },
+    violet: { bg:"bg-violet-500/15", border:"border-violet-500/20", text:"text-violet-400" },
+    amber:  { bg:"bg-amber-500/15",  border:"border-amber-500/20",  text:"text-amber-400"  },
+  };
+  const c = colorMap[color] || colorMap.azure;
+  return (
+    <div className={`rounded-xl border ${open ? "border-dim" : "border-edge"} bg-ink overflow-hidden transition-all`}>
+      <button onClick={() => setOpen(o => !o)}
+        className="w-full flex items-center gap-3 px-4 py-3.5 hover:bg-white/2 transition-colors text-left">
+        <div className={`w-8 h-8 rounded-xl ${c.bg} border ${c.border} flex items-center justify-center shrink-0`}>
+          <Icon size={14} className={c.text} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="text-snow text-xs font-medium">{title}</p>
+          <p className="text-dim text-xs mt-0.5">{subtitle}</p>
+        </div>
+        {open ? <ChevronUp size={14} className="text-dim" /> : <ChevronDown size={14} className="text-dim" />}
+      </button>
+      {open && (
+        <div className="px-4 pb-4 pt-1 border-t border-edge animate-slide-up">
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Main ──────────────────────────────────────────────────────────────────────
+export default function AdminDashboard() {
+  const [stats,   setStats]   = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error,   setError]   = useState(null);
+
+  useEffect(() => {
+    async function load() {
+      try {
+        const r = await getAdminStats();
+        setStats(r.data);
+        setError(null);
+      } catch {
+        setError("Could not load stats — check backend connection.");
+      } finally { setLoading(false); }
+    }
+    load();
+    const t = setInterval(load, 15_000);
+    return () => clearInterval(t);
+  }, []);
+
+  if (loading) return <div className="flex items-center justify-center h-64"><Spinner size={28} /></div>;
+
+  const services = [
+    { name: "Node API",  status: !error, detail: "http://localhost:4040" },
+    { name: "MongoDB",   status: !error, detail: "mongoose / attendance" },
+    { name: "BLE Svc",  status: true,   detail: process.env.REACT_APP_BLE_URL || "http://localhost:8000" },
+    { name: "JWT Auth",  status: true,   detail: "HS256" },
+  ];
+
+  return (
+    <div className="space-y-8">
+      <div className="animate-slide-up flex items-center gap-3">
+        <div className="w-10 h-10 rounded-xl bg-rose-500/15 flex items-center justify-center border border-rose-500/20">
+          <Shield size={18} className="text-rose-400" />
+        </div>
+        <div>
+          <h1 className="text-snow text-2xl font-bold tracking-tight">Admin Panel</h1>
+          <p className="text-soft text-sm mt-0.5">System management and service health</p>
+        </div>
+      </div>
+
+      {error && (
+        <div className="flex items-start gap-3 bg-amber-500/10 border border-amber-500/20 rounded-2xl px-5 py-4">
+          <AlertTriangle size={16} className="text-amber-400 shrink-0 mt-0.5" />
+          <p className="text-amber-300 text-sm">{error}</p>
+        </div>
+      )}
+
+      {stats && (
+        <div className="grid grid-cols-3 lg:grid-cols-6 gap-4 animate-slide-up">
+          {[
+            { label: "Students",    value: stats.students,    color: "text-jade-400"   },
+            { label: "Professors",  value: stats.professors,  color: "text-violet-400" },
+            { label: "Courses",     value: stats.courses,     color: "text-azure-400"  },
+            { label: "Sessions",    value: stats.sessions,    color: "text-amber-400"  },
+            { label: "Enrollments", value: stats.enrollments, color: "text-rose-400"   },
+            { label: "Att. Marks",  value: stats.attendance,  color: "text-snow"       },
+          ].map((s, i) => (
+            <div key={i} className="bg-card border border-edge rounded-2xl p-4 text-center">
+              <p className="text-soft text-xs uppercase tracking-widest mb-1">{s.label}</p>
+              <p className={`text-2xl font-bold font-mono ${s.color}`}>{s.value}</p>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="bg-card border border-edge rounded-2xl p-6 animate-slide-up">
+        <h2 className="text-snow font-semibold text-sm mb-4">Service Health</h2>
+        <div className="space-y-3">
+          {services.map((svc, i) => (
+            <div key={i} className="flex items-center gap-3 p-3 rounded-xl bg-ink border border-edge">
+              <div className={`w-2 h-2 rounded-full ${svc.status ? "bg-jade-400" : "bg-rose-400"} animate-pulse`} />
+              <div className="flex-1">
+                <p className="text-snow text-sm font-medium">{svc.name}</p>
+                <p className="text-dim text-xs font-mono">{svc.detail}</p>
+              </div>
+              <Badge label={svc.status ? "UP" : "DOWN"} variant={svc.status ? "live" : "danger"} />
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="animate-slide-up space-y-3">
+        <h2 className="text-snow font-semibold text-sm">Management</h2>
+
+        <ActionCard icon={BookOpen} title="Courses & Enrollment"
+          subtitle="Create courses, manage enrollment and TAs" color="azure">
+          <CoursesPanel />
+        </ActionCard>
+
+        <ActionCard icon={Users} title="Users"
+          subtitle="Add/remove students and professors · view attendance analytics" color="jade">
+          <UsersPanel />
+        </ActionCard>
+
+        <ActionCard icon={Activity} title="Sessions"
+          subtitle="Browse recent sessions across all courses" color="violet">
+          <SessionsPanel />
+        </ActionCard>
+
+        <ActionCard icon={Server} title="Server Logs"
+          subtitle="Access backend logs via Docker CLI" color="amber">
+          <div className="bg-ink border border-edge rounded-xl p-4 font-mono text-xs space-y-2">
+            {[
+              "Server logs are generated by the Docker container.",
+              "To view live logs:", "  docker logs -f attendance-backend",
+              "Tail last 100 lines:", "  docker logs --tail 100 attendance-backend",
+            ].map((line, i) => (
+              <p key={i} className={line.startsWith("  ") ? "text-jade-400 pl-4" : "text-soft"}>{line}</p>
+            ))}
+          </div>
+        </ActionCard>
+      </div>
+
+      <div className="flex items-center gap-2 px-1 animate-slide-up">
+        <CheckCircle2 size={13} className="text-jade-400" />
+        <p className="text-dim text-xs font-mono">
+          All timestamps stored as UTC · displayed in IST (UTC+5:30)
+        </p>
+      </div>
+    </div>
+  );
+}
+
+---
+frontend/src/pages/AdminOverview.js
+---
+import { useState, useEffect } from "react";
+import { getAdminStats } from "../api/client";
+import { LayoutDashboard, BookOpen, Users, TrendingUp, AlertTriangle } from "lucide-react";
+import { StatCard, Spinner } from "../components/UI";
+
+function nowIST() {
+  return new Date().toLocaleString("en-IN", {
+    timeZone: "Asia/Kolkata",
+    weekday: "long", year: "numeric", month: "long", day: "numeric",
+    hour: "2-digit", minute: "2-digit",
+  });
+}
+
+export default function AdminOverview() {
+  const [stats,   setStats]   = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error,   setError]   = useState(null);
+  const [istTime, setIstTime] = useState(nowIST());
+
+  useEffect(() => {
+    async function load() {
+      try {
+        const res = await getAdminStats();
+        setStats(res.data);
+        setError(null);
+      } catch {
+        setError("Could not load stats — check backend connection.");
+      } finally {
+        setLoading(false);
+      }
+    }
+    load();
+    const dataTimer  = setInterval(load, 15_000);
+    const clockTimer = setInterval(() => setIstTime(nowIST()), 30_000);
+    return () => { clearInterval(dataTimer); clearInterval(clockTimer); };
+  }, []);
+
+  if (loading) return (
+    <div className="flex items-center justify-center h-64"><Spinner size={28} /></div>
+  );
+
+  return (
+    <div className="space-y-8">
+      {/* Header */}
+      <div className="animate-slide-up flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-azure-500/15 flex items-center justify-center border border-azure-500/20">
+            <LayoutDashboard size={18} className="text-azure-400" />
+          </div>
+          <div>
+            <h1 className="text-snow text-2xl font-bold tracking-tight">Overview</h1>
+            <p className="text-soft text-sm mt-0.5">System-wide attendance summary</p>
+          </div>
+        </div>
+        <p className="text-dim text-xs font-mono hidden md:block">{istTime} IST</p>
+      </div>
+
+      {error && (
+        <div className="flex items-start gap-3 bg-amber-500/10 border border-amber-500/20 rounded-2xl px-5 py-4 animate-slide-up">
+          <AlertTriangle size={16} className="text-amber-400 shrink-0 mt-0.5" />
+          <p className="text-amber-300 text-sm">{error}</p>
+        </div>
+      )}
+
+      {/* Live stats — lecture-based */}
+      <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
+        <StatCard label="Total Lectures"   value={stats?.lectures   ?? "—"} icon={BookOpen}    color="azure"  delay={0}   />
+        <StatCard label="Total Students"   value={stats?.students   ?? "—"} icon={Users}       color="jade"   delay={80}  />
+        <StatCard label="Total Courses"    value={stats?.courses    ?? "—"} icon={LayoutDashboard} color="violet" delay={160} />
+        <StatCard label="Active Sessions"  value={stats?.sessions   ?? "—"} icon={TrendingUp}  color="amber"  delay={240} />
+        <StatCard label="Enrollments"      value={stats?.enrollments ?? "—"} icon={Users}       color="rose"   delay={320} />
+        <StatCard label="Professors"       value={stats?.professors ?? "—"} icon={Users}       color="azure"  delay={400} />
+      </div>
+
+      {/* Summary note */}
+      <div className="bg-card border border-edge rounded-2xl p-6 animate-slide-up" style={{ animationDelay: "200ms" }}>
+        <h2 className="text-snow font-semibold text-sm mb-3">System Summary</h2>
+        <p className="text-soft text-sm leading-relaxed">
+          DIAMS is tracking{" "}
+          <span className="text-snow font-medium">{stats?.lectures ?? 0}</span> scheduled lectures across{" "}
+          <span className="text-snow font-medium">{stats?.courses ?? 0}</span> courses with{" "}
+          <span className="text-snow font-medium">{stats?.enrollments ?? 0}</span> active student enrollments.
+        </p>
+        <p className="text-dim text-xs mt-3 font-mono">Data refreshes every 15 seconds. All times shown in IST (UTC+5:30).</p>
+      </div>
+    </div>
+  );
+}
+
+---
+frontend/src/pages/Analytics.js
+---
+import { useState, useEffect } from "react";
+import {
+  getCourses, getCourseAnalytics, getProfAnalytics,
+  getAdminAnalytics, getAtRiskStudents, getCourseStudentStats,
+} from "../api/client";
+import { useAuth } from "../context/AuthContext";
+import {
+  BarChart, Bar, Cell, XAxis, YAxis, Tooltip, ResponsiveContainer,
+} from "recharts";
+import {
+  BarChart3, TrendingUp, Users, Activity, AlertTriangle,
+  GraduationCap, ChevronDown, ChevronUp, BookOpen, Calendar,
+} from "lucide-react";
+import { StatCard, ProgressBar, AttendancePct, Spinner, Empty } from "../components/UI";
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+const DarkTooltip = ({ active, payload, label }) => {
+  if (!active || !payload?.length) return null;
+  return (
+    <div className="bg-card border border-edge rounded-xl px-3 py-2.5 text-xs shadow-float">
+      <p className="text-snow font-medium mb-1">{label}</p>
+      {payload.map((p, i) => (
+        <p key={i} style={{ color: p.color }}>{p.name}: {p.value}</p>
+      ))}
+    </div>
+  );
+};
+
+const COURSE_COLORS = ["bg-azure-500","bg-jade-500","bg-violet-500","bg-amber-500","bg-rose-500"];
+const BAR_COLORS    = ["#3B82F6","#34D399","#8B5CF6","#FBBF24","#FB7185"];
+
+// ── Lecture timeline for one course ──────────────────────────────────────────
+function LectureTimeline({ courseId }) {
+  const [data,    setData]    = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [open,    setOpen]    = useState(false);
+
+  useEffect(() => {
+    getCourseAnalytics(courseId)
+      .then(r => setData(r.data))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [courseId]);
+
+  if (loading) return <div className="flex justify-center py-4"><Spinner size={16} /></div>;
+  if (!data) return null;
+
+  // Use sessionCount > 0 to determine if lecture was held
+  const held = (data.lectureStats || []).filter(l => l.sessionCount > 0);
+  if (held.length === 0) return (
+    <p className="text-dim text-xs py-3 text-center">No lectures held yet.</p>
+  );
+
+  return (
+    <div>
+      <button onClick={() => setOpen(o => !o)}
+        className="flex items-center gap-1.5 text-xs text-dim hover:text-soft transition-colors py-2">
+        {open ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+        {open ? "Hide" : "Show"} lecture breakdown ({held.length} held)
+      </button>
+      {open && (
+        <div className="space-y-1 max-h-64 overflow-y-auto mt-1">
+          {held.map((l, i) => (
+            <div key={i} className="flex items-center gap-3 py-1.5 px-2 rounded-lg hover:bg-white/2">
+              <span className="text-dim text-xs font-mono w-20 shrink-0">
+                {new Date(l.scheduledTime).toLocaleDateString("en-IN", {
+                  timeZone: "Asia/Kolkata", day: "2-digit", month: "short",
+                })}
+              </span>
+              <span className="text-dim text-xs font-mono w-12 shrink-0">
+                {l.sessionCount} sess
+              </span>
+              <div className="flex-1">
+                <ProgressBar value={l.attendancePct} max={100} />
+              </div>
+              <span className="text-soft text-xs font-mono w-24 text-right shrink-0">
+                {l.attended}/{l.enrolled} ({l.attendancePct}%)
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Per-course student table ──────────────────────────────────────────────────
+function CourseStudentTable({ courseId }) {
+  const [data,    setData]    = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    getCourseStudentStats(courseId)
+      .then(r => setData(r.data))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [courseId]);
+
+  if (loading) return <div className="flex justify-center py-6"><Spinner size={18} /></div>;
+  if (!data)   return <p className="text-dim text-sm text-center py-4">Could not load.</p>;
+
+  return (
+    <div className="space-y-2">
+      <p className="text-soft text-xs font-mono">
+        {data.enrolled} enrolled · {data.totalLectures} lectures held
+      </p>
+      <div className="divide-y divide-edge rounded-xl border border-edge overflow-hidden max-h-64 overflow-y-auto">
+        {data.studentStats.length === 0 ? (
+          <p className="text-soft text-sm text-center py-6">No students enrolled.</p>
+        ) : data.studentStats.map((s, i) => (
+          <div key={i} className="flex items-center gap-3 px-4 py-2.5 bg-ink hover:bg-white/2 transition-colors">
+            <div className="w-7 h-7 rounded-lg bg-azure-500/15 flex items-center justify-center shrink-0">
+              <span className="text-azure-400 text-xs font-bold">{s.name.charAt(0)}</span>
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-snow text-xs font-medium truncate">{s.name}</p>
+              <p className="text-dim text-xs font-mono truncate">{s.student_id}</p>
+            </div>
+            <div className="w-20 shrink-0">
+              <ProgressBar value={s.attendancePct} max={100} />
+            </div>
+            <AttendancePct value={s.attendancePct} />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── At-Risk card ──────────────────────────────────────────────────────────────
+function AtRiskCard({ profId }) {
+  const [data,    setData]    = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    getAtRiskStudents(profId)
+      .then(r => setData(r.data))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [profId]);
+
+  return (
+    <div className="bg-card border border-edge rounded-2xl p-6">
+      <div className="flex items-center gap-2 mb-1">
+        <AlertTriangle size={14} className="text-rose-400" />
+        <h2 className="text-snow font-semibold text-sm">At-Risk Students</h2>
+      </div>
+      <p className="text-soft text-xs mb-4">Below 75% lecture attendance in any course</p>
+      {loading ? (
+        <div className="flex items-center justify-center h-32"><Spinner size={20} /></div>
+      ) : data.length === 0 ? (
+        <div className="flex flex-col items-center justify-center gap-2 h-32">
+          <Users size={20} className="text-jade-400" />
+          <p className="text-soft text-xs text-center">No at-risk students 🎉</p>
+        </div>
+      ) : (
+        <div className="space-y-2 max-h-64 overflow-y-auto">
+          {data.map((s, i) => (
+            <div key={i} className="flex items-center gap-3 p-2.5 rounded-xl bg-ink border border-edge hover:border-rose-500/20 transition-colors">
+              <div className="w-7 h-7 rounded-lg bg-rose-500/15 flex items-center justify-center shrink-0 border border-rose-500/20">
+                <span className="text-rose-400 text-xs font-bold">{s.student_name.charAt(0)}</span>
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-snow text-xs font-medium truncate">{s.student_name}</p>
+                <p className="text-dim text-xs font-mono truncate">{s.course_name}</p>
+              </div>
+              <div className="text-right shrink-0">
+                <p className="text-rose-400 text-xs font-bold font-mono">{s.pct}%</p>
+                <p className="text-dim text-xs font-mono">{s.attended}/{s.total}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      {!loading && data.length > 0 && (
+        <p className="text-dim text-xs font-mono mt-3 pt-3 border-t border-edge">
+          {data.length} student{data.length !== 1 ? "s" : ""} flagged
+        </p>
+      )}
+    </div>
+  );
+}
+
+// ── Prof / TA Analytics view ──────────────────────────────────────────────────
+function ProfAnalyticsView({ user }) {
+  const [loading,  setLoading]  = useState(true);
+  const [profData, setProfData] = useState([]);
+  const [expanded, setExpanded] = useState(null);
+
+  useEffect(() => {
+    async function load() {
+      try {
+        const pRes = await getProfAnalytics(user.user_id);
+        setProfData(pRes.data);
+      } finally {
+        setLoading(false);
+      }
+    }
+    load();
+  }, [user]);
+
+  if (loading) return <div className="flex items-center justify-center h-64"><Spinner size={28} /></div>;
+
+  /**
+   * Backend returns per course:
+   *   lectures     = course.lectures.length  (total PLANNED lectures from slot map)
+   *   lecturesHeld = distinct lectures that had ≥1 session
+   *   sessions     = total DB session rows (one per method per lecture)
+   *   attendance   = total marks across all sessions
+   *
+   * What we show:
+   *   "Lectures Held"   = sum of lecturesHeld  (lectures that actually happened)
+   *   "Planned Lectures" = sum of lectures      (from slot map)
+   *   "Avg Marks/Lecture" = attendance / lecturesHeld
+   */
+  const totalLecturesHeld = profData.reduce((s, c) => s + (c.lecturesHeld ?? c.sessions ?? 0), 0);
+  const totalPlanned      = profData.reduce((s, c) => s + (c.lectures ?? 0), 0);
+  const totalAttendance   = profData.reduce((s, c) => s + (c.attendance ?? 0), 0);
+  const avgMarksPerLecture = totalLecturesHeld > 0
+    ? (totalAttendance / totalLecturesHeld).toFixed(1)
+    : "0.0";
+
+  const barData = profData.map(c => ({
+    name:         c.course_name.length > 12 ? c.course_name.slice(0, 12) + "…" : c.course_name,
+    avg_pct:      c.avg_pct ?? 0,
+    lecturesHeld: c.lecturesHeld ?? 0,
+    planned:      c.lectures ?? 0,
+  }));
+
+  return (
+    <div className="space-y-8">
+      {/* Summary stats — correct labels */}
+      <div className="grid grid-cols-3 gap-4">
+        <StatCard
+          label="Lectures Held"
+          value={totalLecturesHeld}
+          icon={Activity}
+          color="azure"
+          delay={0}
+          sub="lectures that had at least one session"
+        />
+        <StatCard
+          label="Planned Lectures"
+          value={totalPlanned}
+          icon={Calendar}
+          color="violet"
+          delay={80}
+          sub="from slot map across all courses"
+        />
+        <StatCard
+          label="Avg Marks / Lecture"
+          value={avgMarksPerLecture}
+          icon={TrendingUp}
+          color="jade"
+          delay={160}
+          sub="attendance marks per lecture held"
+        />
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* Bar chart */}
+        <div className="lg:col-span-2 bg-card border border-edge rounded-2xl p-6 animate-slide-up">
+          <div className="flex items-center justify-between mb-6">
+            <div>
+              <h2 className="text-snow font-semibold text-sm">Avg Attendance % per Course</h2>
+              <p className="text-soft text-xs mt-0.5">Lecture-based: fully-attended lectures / enrolled</p>
+            </div>
+            <BarChart3 size={16} className="text-dim" />
+          </div>
+          {barData.length === 0 ? (
+            <Empty icon={BarChart3} title="No data yet" sub="Start sessions to see data here." />
+          ) : (
+            <ResponsiveContainer width="100%" height={200}>
+              <BarChart data={barData} barSize={24}>
+                <XAxis dataKey="name" tick={{ fill: "#6B7499", fontSize: 11 }} axisLine={false} tickLine={false} />
+                <YAxis tick={{ fill: "#6B7499", fontSize: 11 }} axisLine={false} tickLine={false} domain={[0,100]}
+                  tickFormatter={v => `${v}%`} />
+                <Tooltip content={<DarkTooltip />} cursor={{ fill: "rgba(255,255,255,0.03)" }} />
+                <Bar dataKey="avg_pct" name="Avg Attendance %" radius={[6,6,0,0]}>
+                  {barData.map((_, i) => <Cell key={i} fill={BAR_COLORS[i % BAR_COLORS.length]} />)}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          )}
+        </div>
+        <AtRiskCard profId={user.user_id} />
+      </div>
+
+      {/* Per-course breakdown */}
+      {profData.length > 0 && (
+        <div className="bg-card border border-edge rounded-2xl overflow-hidden animate-slide-up">
+          <div className="px-5 py-4 border-b border-edge">
+            <h2 className="text-snow font-semibold text-sm">Course Breakdown</h2>
+            <p className="text-soft text-xs mt-0.5">Click to see per-student and per-lecture stats</p>
+          </div>
+          <div className="divide-y divide-edge">
+            {profData.map((c, i) => (
+              <div key={c.course_id}>
+                <button
+                  onClick={() => setExpanded(expanded === c.course_id ? null : c.course_id)}
+                  className="w-full flex items-center gap-4 px-5 py-4 hover:bg-white/2 transition-colors text-left"
+                >
+                  <div className={`w-2 h-8 rounded-full shrink-0 ${COURSE_COLORS[i % COURSE_COLORS.length]}`} />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-snow text-sm font-medium">{c.course_name}</p>
+                    <p className="text-soft text-xs mt-0.5">
+                      {c.lecturesHeld ?? 0} held · {c.lectures ?? 0} planned · {c.enrolled} enrolled
+                    </p>
+                  </div>
+                  <div className="w-28 shrink-0">
+                    <ProgressBar value={c.avg_pct ?? 0} max={100} />
+                  </div>
+                  <AttendancePct value={c.avg_pct ?? 0} />
+                  {expanded === c.course_id
+                    ? <ChevronUp size={14} className="text-dim shrink-0" />
+                    : <ChevronDown size={14} className="text-dim shrink-0" />}
+                </button>
+                {expanded === c.course_id && (
+                  <div className="px-5 pb-5 space-y-4 border-t border-edge bg-ink animate-slide-up">
+                    <LectureTimeline courseId={c.course_id} />
+                    <CourseStudentTable courseId={c.course_id} />
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Admin Analytics view ──────────────────────────────────────────────────────
+function AdminAnalyticsView() {
+  const [data,     setData]     = useState(null);
+  const [loading,  setLoading]  = useState(true);
+  const [expanded, setExpanded] = useState(null);
+
+  useEffect(() => {
+    getAdminAnalytics()
+      .then(r => setData(r.data))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, []);
+
+  if (loading) return <div className="flex items-center justify-center h-64"><Spinner size={28} /></div>;
+  if (!data) return (
+    <div className="flex items-center gap-3 bg-amber-500/10 border border-amber-500/20 rounded-2xl px-5 py-4">
+      <AlertTriangle size={16} className="text-amber-400" />
+      <p className="text-amber-300 text-sm">Could not load admin analytics.</p>
+    </div>
+  );
+
+  const { totals, profs } = data;
+  const allCourses = profs.flatMap(p => p.courses.map(c => ({
+    name:    c.name.length > 12 ? c.name.slice(0, 12) + "…" : c.name,
+    avg_pct: c.avg_pct ?? 0,
+  })));
+
+  return (
+    <div className="space-y-8">
+      <div className="grid grid-cols-3 lg:grid-cols-6 gap-4">
+        {[
+          { label: "Active Sessions", value: totals.activeSessions ?? totals.sessions, color: "text-jade-400"   },
+          { label: "Att. Marks",      value: totals.attendance,                        color: "text-azure-400"  },
+          { label: "Avg/Session",     value: totals.avg,                               color: "text-violet-400" },
+          { label: "Students",        value: totals.students,                          color: "text-amber-400"  },
+          { label: "Courses",         value: totals.courses,                           color: "text-rose-400"   },
+          { label: "Professors",      value: totals.profs,                             color: "text-snow"       },
+        ].map((s, i) => (
+          <div key={i} className="bg-card border border-edge rounded-2xl p-4 text-center animate-slide-up"
+            style={{ animationDelay: `${i * 40}ms` }}>
+            <p className="text-soft text-xs uppercase tracking-widest mb-1">{s.label}</p>
+            <p className={`text-2xl font-bold font-mono ${s.color}`}>{s.value}</p>
+          </div>
+        ))}
+      </div>
+
+      <div className="bg-card border border-edge rounded-2xl p-6 animate-slide-up">
+        <div className="flex items-center justify-between mb-6">
+          <div>
+            <h2 className="text-snow font-semibold text-sm">Avg Attendance % per Course</h2>
+            <p className="text-soft text-xs mt-0.5">Lecture-based across all professors</p>
+          </div>
+          <BarChart3 size={16} className="text-dim" />
+        </div>
+        {allCourses.length === 0 ? (
+          <Empty icon={BarChart3} title="No course data" sub="Start sessions to see data." />
+        ) : (
+          <ResponsiveContainer width="100%" height={220}>
+            <BarChart data={allCourses} barSize={24}>
+              <XAxis dataKey="name" tick={{ fill: "#6B7499", fontSize: 11 }} axisLine={false} tickLine={false} />
+              <YAxis tick={{ fill: "#6B7499", fontSize: 11 }} axisLine={false} tickLine={false} domain={[0,100]}
+                tickFormatter={v => `${v}%`} />
+              <Tooltip content={<DarkTooltip />} cursor={{ fill: "rgba(255,255,255,0.03)" }} />
+              <Bar dataKey="avg_pct" name="Avg Attendance %" radius={[6,6,0,0]}>
+                {allCourses.map((_, i) => <Cell key={i} fill={BAR_COLORS[i % BAR_COLORS.length]} />)}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        )}
+      </div>
+
+      {profs.map((prof, pi) => (
+        <div key={prof.prof_id} className="bg-card border border-edge rounded-2xl overflow-hidden animate-slide-up"
+          style={{ animationDelay: `${160 + pi * 60}ms` }}>
+          <div className="px-5 py-4 border-b border-edge flex items-center gap-3">
+            <div className="w-8 h-8 rounded-xl bg-violet-500/15 border border-violet-500/20 flex items-center justify-center">
+              <GraduationCap size={14} className="text-violet-400" />
+            </div>
+            <div>
+              <p className="text-snow font-semibold text-sm">{prof.prof_name}</p>
+              <p className="text-soft text-xs font-mono">{prof.courses.length} course{prof.courses.length !== 1 ? "s" : ""}</p>
+            </div>
+          </div>
+          {prof.courses.length === 0 ? (
+            <p className="text-soft text-sm text-center py-6">No courses assigned.</p>
+          ) : (
+            <div className="divide-y divide-edge">
+              {prof.courses.map((c, ci) => (
+                <div key={c.course_id}>
+                  <button
+                    onClick={() => setExpanded(expanded === `${prof.prof_id}-${c.course_id}` ? null : `${prof.prof_id}-${c.course_id}`)}
+                    className="w-full flex items-center gap-4 px-5 py-4 hover:bg-white/2 transition-colors text-left"
+                  >
+                    <div className={`w-2 h-8 rounded-full shrink-0 ${COURSE_COLORS[ci % COURSE_COLORS.length]}`} />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-snow text-sm font-medium">{c.name}</p>
+                      <p className="text-soft text-xs mt-0.5">
+                        {c.lecturesHeld ?? c.sessions ?? 0} held · {c.lectures ?? 0} planned · {c.enrolled} enrolled
+                      </p>
+                    </div>
+                    <div className="w-28 shrink-0">
+                      <ProgressBar value={c.avg_pct ?? 0} max={100} />
+                    </div>
+                    <AttendancePct value={c.avg_pct ?? 0} />
+                    {expanded === `${prof.prof_id}-${c.course_id}`
+                      ? <ChevronUp size={14} className="text-dim shrink-0" />
+                      : <ChevronDown size={14} className="text-dim shrink-0" />}
+                  </button>
+                  {expanded === `${prof.prof_id}-${c.course_id}` && (
+                    <div className="px-5 pb-5 border-t border-edge bg-ink animate-slide-up space-y-4">
+                      <LectureTimeline courseId={c.course_id} />
+                      <CourseStudentTable courseId={c.course_id} />
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── Root ──────────────────────────────────────────────────────────────────────
+export default function Analytics() {
+  const { user } = useAuth();
+  return (
+    <div className="space-y-8">
+      <div className="animate-slide-up">
+        <h1 className="text-snow text-2xl font-bold tracking-tight">Analytics</h1>
+        <p className="text-soft text-sm mt-1">
+          {user.role === "admin"
+            ? "System-wide attendance breakdown — lecture as unit"
+            : "Attendance insights across your courses — lecture as unit"}
+        </p>
+      </div>
+      {user.role === "admin" ? <AdminAnalyticsView /> : <ProfAnalyticsView user={user} />}
+    </div>
+  );
+}
+
+---
+frontend/src/pages/CourseView.js
+---
+import { useState, useEffect, useCallback } from "react";
+import {
+  startSession, getQR, getAttendance, endSession, getActiveSession,
+  manualAttendanceBulk, getCourseStudents,
+  getCourseSchedules, addSchedule as apiAddSchedule,
+  updateSchedule as apiUpdateSchedule, deleteScheduleItem as apiDeleteSchedule,
+} from "../api/client";
+import { QRCodeCanvas } from "qrcode.react";
+import {
+  Wifi, QrCode, Layers, Play, Square, RefreshCw, Activity,
+  Users, Clock, ArrowLeft, CheckCircle2, CalendarClock,
+  Plus, Trash2, ToggleLeft, ToggleRight, Pencil, Save, X,
+} from "lucide-react";
+import { Button, Badge, Empty, Spinner } from "../components/UI";
+import { useAuth } from "../context/AuthContext";
+
+const MODES = [
+  { value: "BLE",    label: "BLE Beacon", icon: Wifi   },
+  { value: "QRCode", label: "QR Code",    icon: QrCode },
+  { value: "Manual", label: "Manual",     icon: Users  },
+];
+
+const DAYS = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
+const VALID_DAYS = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"];
+
+function formatIST(utcStr) {
+  if (!utcStr) return "—";
+  const s = utcStr.endsWith("Z") || utcStr.includes("+") ? utcStr : utcStr + "Z";
+  return new Date(s).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
+}
+
+function StatBox({ label, value, mono }) {
+  return (
+    <div className="bg-card border border-edge rounded-2xl p-4 flex flex-col gap-1">
+      <p className="text-soft text-xs uppercase tracking-widest">{label}</p>
+      <p className={`text-snow text-2xl font-bold ${mono ? "font-mono" : ""}`}>{value}</p>
+    </div>
+  );
+}
+
+function InfoRow({ icon: Icon, label, value, mono }) {
+  return (
+    <div className="flex items-center justify-between py-2 border-b border-edge last:border-0">
+      <div className="flex items-center gap-2">
+        {Icon && <Icon size={13} className="text-dim" />}
+        <span className="text-soft text-xs">{label}</span>
+      </div>
+      <span className={`text-snow text-sm ${mono ? "font-mono" : ""}`}>{value}</span>
+    </div>
+  );
+}
+
+// ── Schedule row with inline edit ─────────────────────────────────────────────
+function ScheduleRow({ sch, index, onToggle, onDelete, onSave, saving }) {
+  const [editing, setEditing] = useState(false);
+  const [form,    setForm]    = useState({
+    scheduledDay: sch.scheduledDay,
+    startTime:    sch.startTime,
+    endTime:      sch.endTime,
+    method:       sch.method,
+    switch:       sch.switch,
+  });
+
+  const handleSave = async () => {
+    await onSave(index, form);
+    setEditing(false);
+  };
+
+  if (editing) {
+    return (
+      <div className="px-5 py-3 bg-ink border-b border-edge space-y-3">
+        <div className="grid grid-cols-2 gap-3">
+          <div className="space-y-1">
+            <label className="text-xs text-soft">Day</label>
+            <select
+              value={form.scheduledDay}
+              onChange={e => setForm(f => ({ ...f, scheduledDay: e.target.value }))}
+              className="w-full bg-card border border-edge rounded-xl text-sm text-snow px-3 py-2 focus:outline-none focus:border-violet-500 transition-all appearance-none"
+            >
+              {VALID_DAYS.map(d => <option key={d} value={d}>{d}</option>)}
+            </select>
+          </div>
+          <div className="space-y-1">
+            <label className="text-xs text-soft">Method</label>
+            <select
+              value={form.method}
+              onChange={e => setForm(f => ({ ...f, method: e.target.value }))}
+              className="w-full bg-card border border-edge rounded-xl text-sm text-snow px-3 py-2 focus:outline-none focus:border-violet-500 transition-all appearance-none"
+            >
+              {["BLE","QRCode","Manual"].map(m => <option key={m} value={m}>{m}</option>)}
+            </select>
+          </div>
+          <div className="space-y-1">
+            <label className="text-xs text-soft">Start Time (IST)</label>
+            <input type="time" value={form.startTime}
+              onChange={e => setForm(f => ({ ...f, startTime: e.target.value }))}
+              className="w-full bg-card border border-edge rounded-xl text-sm text-snow px-3 py-2 focus:outline-none focus:border-violet-500 transition-all" />
+          </div>
+          <div className="space-y-1">
+            <label className="text-xs text-soft">End Time (IST)</label>
+            <input type="time" value={form.endTime}
+              onChange={e => setForm(f => ({ ...f, endTime: e.target.value }))}
+              className="w-full bg-card border border-edge rounded-xl text-sm text-snow px-3 py-2 focus:outline-none focus:border-violet-500 transition-all" />
+          </div>
+        </div>
+        <div className="flex gap-2">
+          <button onClick={handleSave} disabled={saving}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-violet-500/15 text-violet-400 text-xs border border-violet-500/20 hover:bg-violet-500/25 transition-colors disabled:opacity-50">
+            {saving ? <Spinner size={12} /> : <Save size={12} />} Save
+          </button>
+          <button onClick={() => setEditing(false)}
+            className="px-3 py-1.5 rounded-lg bg-edge text-soft text-xs hover:text-snow transition-colors">
+            Cancel
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  const methodVariant = sch.method === "BLE" ? "ble" : sch.method === "QRCode" ? "qr" : "manual";
+
+  return (
+    <div className={`flex items-center gap-4 px-5 py-3.5 hover:bg-white/2 transition-colors border-b border-edge last:border-0 ${!sch.switch ? "opacity-50" : ""}`}>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-snow text-sm font-medium">{sch.scheduledDay}</span>
+          <span className="text-soft text-xs font-mono">{sch.startTime} → {sch.endTime} IST</span>
+          <Badge label={sch.method} variant={methodVariant} />
+          {!sch.switch && <span className="text-dim text-xs font-mono">auto-start off</span>}
+        </div>
+      </div>
+      {/* Pencil edit */}
+      <button onClick={() => setEditing(true)} title="Edit"
+        className="text-dim hover:text-violet-400 transition-colors shrink-0">
+        <Pencil size={14} />
+      </button>
+      {/* Toggle auto-start */}
+      <button onClick={() => onToggle(index)} title={sch.switch ? "Disable auto-start" : "Enable auto-start"}
+        className="transition-colors shrink-0">
+        {sch.switch
+          ? <ToggleRight size={22} className="text-violet-400" />
+          : <ToggleLeft  size={22} className="text-dim" />}
+      </button>
+      {/* Delete */}
+      <button onClick={() => onDelete(index)}
+        className="text-dim hover:text-rose-400 transition-colors shrink-0">
+        <Trash2 size={15} />
+      </button>
+    </div>
+  );
+}
+
+// ── Main ──────────────────────────────────────────────────────────────────────
+export default function CourseView({ course, goBack }) {
+  const { user } = useAuth();
+  const courseId = course.id || course._id;
+
+  const [mode,         setMode]         = useState("BLE");
+  const [session,      setSession]      = useState(null);
+  const [qr,           setQr]           = useState("");
+  const [attendance,   setAttendance]   = useState([]);
+  const [loadingStart, setLoadingStart] = useState(false);
+  const [error,        setError]        = useState("");
+  const [elapsed,      setElapsed]      = useState(0);
+
+  // Schedule state
+  const [schedules,    setSchedules]    = useState([]);
+  const [schLoading,   setSchLoading]   = useState(true);
+  const [showSchForm,  setShowSchForm]  = useState(false);
+  const [schSaving,    setSchSaving]    = useState(false);
+  const [newSch,       setNewSch]       = useState({
+    scheduledDay: "Monday", startTime: "09:00", endTime: "09:50",
+    method: "BLE", switch: false,
+  });
+
+  // Manual attendance
+  const [roster,   setRoster]   = useState([]);
+  const [selected, setSelected] = useState(new Set());
+
+  // Read-only for TAs on schedule auto-start toggle (TAs can view but not add/delete)
+  const isTa = user?.role === "ta";
+
+  // ── Load schedules from DB ────────────────────────────────────────────────
+  const loadSchedules = useCallback(async () => {
+    setSchLoading(true);
+    try {
+      const r = await getCourseSchedules(courseId);
+      setSchedules(r.data || []);
+    } catch {
+      setSchedules([]);
+    } finally {
+      setSchLoading(false);
+    }
+  }, [courseId]);
+
+  useEffect(() => { loadSchedules(); }, [loadSchedules]);
+
+  // ── Restore active session on mount ──────────────────────────────────────
+  useEffect(() => {
+    async function restore() {
+      try {
+        const res = await getActiveSession(courseId);
+        if (res.data?.session_id) {
+          setSession(res.data);
+          setMode(res.data.method || "BLE");
+        }
+      } catch {}
+    }
+    restore();
+  }, [courseId]);
+
+  // ── Session start/end ─────────────────────────────────────────────────────
+  const handleStart = async () => {
+    setLoadingStart(true); setError("");
+    try {
+      const res = await startSession({ course_id: courseId, mode });
+      setSession(res.data);
+      setElapsed(0);
+    } catch (e) {
+      setError(e.response?.data?.error || "Could not start session.");
+    } finally {
+      setLoadingStart(false);
+    }
+  };
+
+  const handleEnd = async () => {
+    if (!session) return;
+    try { await endSession(session.session_id); } catch {}
+    setSession(null); setQr(""); setAttendance([]); setElapsed(0);
+  };
+
+  // ── Load roster ───────────────────────────────────────────────────────────
+  useEffect(() => {
+    getCourseStudents(courseId)
+      .then(r => setRoster(Array.from(new Map(r.data.map(s => [s.id, s])).values())))
+      .catch(() => setRoster([]));
+  }, [courseId]);
+
+  // ── QR refresh ────────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!session || mode === "BLE" || mode === "Manual") return;
+    const fetch = async () => {
+      try { const r = await getQR(session.session_id); setQr(r.data.qr); } catch {}
+    };
+    fetch();
+    const id = setInterval(fetch, 5000);
+    return () => clearInterval(id);
+  }, [session, mode]);
+
+  // ── Attendance polling ────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!session) return;
+    const fetch = async () => {
+      try { const r = await getAttendance(session.session_id); setAttendance(r.data); } catch {}
+    };
+    fetch();
+    const id = setInterval(fetch, 3000);
+    return () => clearInterval(id);
+  }, [session]);
+
+  // ── Elapsed timer ─────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!session) return;
+    const t = setInterval(() => setElapsed(e => e + 1), 1000);
+    return () => clearInterval(t);
+  }, [session]);
+
+  // ── Manual attendance ─────────────────────────────────────────────────────
+  const handleBulkMark = async () => {
+    if (!session || selected.size === 0) return;
+    try {
+      await manualAttendanceBulk({ session_id: session.session_id, student_ids: Array.from(selected) });
+      const r = await getAttendance(session.session_id);
+      setAttendance(r.data);
+      setSelected(new Set());
+    } catch {}
+  };
+
+  // ── Schedule handlers ─────────────────────────────────────────────────────
+  const handleAddSchedule = async () => {
+    setSchSaving(true);
+    try {
+      await apiAddSchedule(courseId, newSch);
+      await loadSchedules();
+      setShowSchForm(false);
+      setNewSch({ scheduledDay: "Monday", startTime: "09:00", endTime: "09:50", method: "BLE", switch: false });
+    } catch (e) {
+      setError(e.response?.data?.error || "Could not add schedule.");
+    } finally {
+      setSchSaving(false);
+    }
+  };
+
+  const handleToggleSchedule = async (idx) => {
+    const sch = schedules[idx];
+    try {
+      await apiUpdateSchedule(courseId, idx, { switch: !sch.switch });
+      await loadSchedules();
+    } catch {}
+  };
+
+  const handleSaveSchedule = async (idx, data) => {
+    setSchSaving(true);
+    try {
+      await apiUpdateSchedule(courseId, idx, data);
+      await loadSchedules();
+    } catch (e) {
+      setError(e.response?.data?.error || "Could not update schedule.");
+    } finally {
+      setSchSaving(false);
+    }
+  };
+
+  const handleDeleteSchedule = async (idx) => {
+    try {
+      await apiDeleteSchedule(courseId, idx);
+      await loadSchedules();
+    } catch {}
+  };
+
+  const presentStudents = new Set(attendance.map(a => a.student)).size;
+  const fmt = s => `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+
+  return (
+    <div className="space-y-8">
+
+      {/* Header */}
+      <div className="flex items-center gap-4 animate-slide-up">
+        <button onClick={goBack}
+          className="w-9 h-9 rounded-xl bg-edge flex items-center justify-center text-soft hover:text-snow transition-colors">
+          <ArrowLeft size={16} />
+        </button>
+        <div className="flex-1">
+          <div className="flex items-center gap-2">
+            <h1 className="text-snow font-bold text-xl">{course.name}</h1>
+            {session && <Badge label="LIVE" variant="live" />}
+          </div>
+          <p className="text-soft text-xs mt-0.5 font-mono">Course ID: {courseId}</p>
+        </div>
+      </div>
+
+      {error && (
+        <div className="text-rose-400 text-sm bg-rose-500/10 border border-rose-500/20 rounded-xl px-4 py-3 flex items-center justify-between">
+          {error}
+          <button onClick={() => setError("")}><X size={14} /></button>
+        </div>
+      )}
+
+      {/* Stats */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 animate-slide-up" style={{ animationDelay: "80ms" }}>
+        <StatBox label="Present"        value={presentStudents} />
+        <StatBox label="Total Students" value={roster.length} />
+        <StatBox label="Total Marks"    value={attendance.length} />
+        <StatBox label="Duration"       value={fmt(elapsed)} mono />
+      </div>
+
+      {/* Mode selector + Start/End */}
+      <div className="flex flex-wrap gap-3 items-end animate-slide-up" style={{ animationDelay: "160ms" }}>
+        <div className="flex gap-2">
+          {MODES.map(({ value, label, icon: Icon }) => (
+            <button key={value}
+              onClick={() => !session && setMode(value)}
+              disabled={!!session}
+              className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium transition-all border
+                ${mode === value
+                  ? "bg-azure-500/15 text-azure-400 border-azure-500/30"
+                  : "bg-card text-soft border-edge hover:text-snow hover:border-dim disabled:opacity-40 disabled:cursor-not-allowed"}`}
+            >
+              <Icon size={14} />{label}
+            </button>
+          ))}
+        </div>
+        {!session ? (
+          <Button onClick={handleStart} loading={loadingStart} size="md">
+            <Play size={14} /> Start Session
+          </Button>
+        ) : (
+          <Button onClick={handleEnd} variant="danger" size="md">
+            <Square size={14} /> End Session
+          </Button>
+        )}
+      </div>
+
+      {/* Main grid */}
+      <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
+        {/* Left: QR / BLE info */}
+        <div className="lg:col-span-2 animate-slide-up" style={{ animationDelay: "200ms" }}>
+          {session && mode === "QRCode" && (
+            <div className="bg-card border border-edge rounded-2xl p-6">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-snow font-semibold text-sm">QR Code</h3>
+                <div className="flex items-center gap-1.5 text-jade-400 text-xs">
+                  <RefreshCw size={11} className="animate-spin-slow" /> Refreshes every 5s
+                </div>
+              </div>
+              {qr ? (
+                <div className="flex flex-col items-center gap-4">
+                  <div className="p-4 bg-white rounded-2xl">
+                    <QRCodeCanvas value={qr} size={180} />
+                  </div>
+                </div>
+              ) : <div className="flex items-center justify-center h-48"><Spinner /></div>}
+            </div>
+          )}
+          {session && mode === "BLE" && (
+            <div className="bg-card border border-edge rounded-2xl p-6">
+              <h3 className="text-snow font-semibold text-sm mb-4">Beacon Info</h3>
+              <div className="space-y-3">
+                <InfoRow icon={Wifi}     label="Mode"       value={<Badge label="BLE" variant="ble" />} />
+                <InfoRow icon={Activity} label="Session ID" value={session.session_id} mono />
+              </div>
+              <div className="mt-4 p-3 rounded-xl bg-azure-500/8 border border-azure-500/15">
+                <p className="text-azure-400 text-xs">ESP32 beacon broadcasting. Students scan with the mobile app.</p>
+              </div>
+            </div>
+          )}
+          {!session && (
+            <div className="bg-card border border-edge rounded-2xl p-6 flex flex-col items-center justify-center h-48 gap-3">
+              <div className="w-12 h-12 rounded-2xl bg-edge flex items-center justify-center">
+                <Play size={20} className="text-dim" />
+              </div>
+              <p className="text-soft text-sm text-center">Start a session to begin tracking attendance</p>
+            </div>
+          )}
+        </div>
+
+        {/* Right: Attendance log */}
+        <div className="lg:col-span-3 animate-slide-up" style={{ animationDelay: "280ms" }}>
+          <div className="bg-card border border-edge rounded-2xl overflow-hidden">
+            <div className="px-5 py-4 border-b border-edge flex items-center justify-between">
+              <h3 className="text-snow font-semibold text-sm">Attendance Log</h3>
+              <span className="text-soft text-xs font-mono">{attendance.length} entries</span>
+            </div>
+            {attendance.length === 0 ? (
+              <Empty icon={Users} title="No attendance yet" sub="Records will appear as students check in." />
+            ) : (
+              <div className="divide-y divide-edge max-h-72 overflow-y-auto">
+                {attendance.slice().reverse().map((a, i) => (
+                  <div key={i} className="flex items-center gap-3 px-5 py-3 hover:bg-white/2 transition-colors">
+                    <div className="w-8 h-8 rounded-xl bg-azure-500/15 flex items-center justify-center shrink-0">
+                      <CheckCircle2 size={14} className="text-azure-400" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-snow text-sm font-medium">{a.studentName || `Student #${a.student}`}</p>
+                      <p className="text-soft text-xs font-mono">{formatIST(a.markedAt || a.timestamp)}</p>
+                    </div>
+                    <Badge label={a.verifiedVia || "Marked"} variant={
+                      a.verifiedVia === "BLE" ? "ble" :
+                      a.verifiedVia === "QRCode" ? "qr" :
+                      a.verifiedVia === "Manual" ? "manual" : "live"
+                    } />
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Manual Roll Call */}
+      {session && (
+        <div className="animate-slide-up bg-card border border-edge rounded-2xl overflow-hidden">
+          <div className="px-5 py-4 border-b border-edge">
+            <h3 className="text-snow font-semibold text-sm">Manual Roll Call</h3>
+          </div>
+          <div className="px-5 py-4 space-y-3">
+            <div className="flex justify-between items-center">
+              <p className="text-xs text-soft">Select students to mark present</p>
+              <button onClick={() => setSelected(new Set(roster.map(s => s.id)))}
+                className="text-xs text-azure-400 hover:text-azure-300 transition-colors">
+                Select All
+              </button>
+            </div>
+            <div className="grid grid-cols-2 gap-2 max-h-48 overflow-y-auto">
+              {roster.map(s => {
+                const alreadyMarked = attendance.some(a => a.student === s.id);
+                return (
+                  <label key={s.id} className={`flex items-center gap-2 text-sm ${alreadyMarked ? "opacity-40 cursor-not-allowed" : "cursor-pointer"}`}>
+                    <input type="checkbox"
+                      checked={selected.has(s.id) || alreadyMarked}
+                      disabled={alreadyMarked}
+                      onChange={() => {
+                        if (alreadyMarked) return;
+                        const n = new Set(selected);
+                        n.has(s.id) ? n.delete(s.id) : n.add(s.id);
+                        setSelected(n);
+                      }}
+                    />
+                    <span className={alreadyMarked ? "text-jade-400" : "text-snow"}>{s.name}</span>
+                    {alreadyMarked && <CheckCircle2 size={12} className="text-jade-400 shrink-0" />}
+                  </label>
+                );
+              })}
+            </div>
+            <button onClick={handleBulkMark} disabled={selected.size === 0}
+              className="mt-2 px-4 py-2 rounded-xl bg-amber-500 text-black text-sm font-medium
+                disabled:opacity-40 disabled:cursor-not-allowed hover:bg-amber-400 transition-colors">
+              Mark Selected ({selected.size})
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Schedules */}
+      <div className="animate-slide-up bg-card border border-edge rounded-2xl overflow-hidden" style={{ animationDelay: "380ms" }}>
+        <div className="px-5 py-4 border-b border-edge flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <CalendarClock size={15} className="text-violet-400" />
+            <h3 className="text-snow font-semibold text-sm">Schedules</h3>
+            <span className="text-dim text-xs font-mono">auto-starts sessions · times in IST</span>
+          </div>
+          {!isTa && (
+            <button onClick={() => setShowSchForm(v => !v)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-violet-500/15 text-violet-400 text-xs
+                hover:bg-violet-500/25 transition-colors border border-violet-500/20">
+              <Plus size={12} /> Add Schedule
+            </button>
+          )}
+        </div>
+
+        {/* Add form */}
+        {showSchForm && !isTa && (
+          <div className="px-5 py-4 border-b border-edge bg-ink space-y-3">
+            <p className="text-snow text-xs font-semibold">New recurring schedule</p>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <label className="text-xs text-soft">Day</label>
+                <select value={newSch.scheduledDay}
+                  onChange={e => setNewSch(s => ({ ...s, scheduledDay: e.target.value }))}
+                  className="w-full bg-card border border-edge rounded-xl text-sm text-snow px-3 py-2 focus:outline-none focus:border-violet-500 transition-all appearance-none">
+                  {VALID_DAYS.map(d => <option key={d} value={d}>{d}</option>)}
+                </select>
+              </div>
+              <div className="space-y-1">
+                <label className="text-xs text-soft">Method</label>
+                <select value={newSch.method}
+                  onChange={e => setNewSch(s => ({ ...s, method: e.target.value }))}
+                  className="w-full bg-card border border-edge rounded-xl text-sm text-snow px-3 py-2 focus:outline-none focus:border-violet-500 transition-all appearance-none">
+                  {["BLE","QRCode","Manual"].map(m => <option key={m} value={m}>{m}</option>)}
+                </select>
+              </div>
+              <div className="space-y-1">
+                <label className="text-xs text-soft">Start Time <span className="text-violet-400 font-mono">(IST)</span></label>
+                <input type="time" value={newSch.startTime}
+                  onChange={e => setNewSch(s => ({ ...s, startTime: e.target.value }))}
+                  className="w-full bg-card border border-edge rounded-xl text-sm text-snow px-3 py-2 focus:outline-none focus:border-violet-500 transition-all" />
+              </div>
+              <div className="space-y-1">
+                <label className="text-xs text-soft">End Time <span className="text-violet-400 font-mono">(IST)</span></label>
+                <input type="time" value={newSch.endTime}
+                  onChange={e => setNewSch(s => ({ ...s, endTime: e.target.value }))}
+                  className="w-full bg-card border border-edge rounded-xl text-sm text-snow px-3 py-2 focus:outline-none focus:border-violet-500 transition-all" />
+              </div>
+            </div>
+            <div className="flex items-center gap-3">
+              <label className="flex items-center gap-2 text-xs text-soft cursor-pointer">
+                <input type="checkbox" checked={newSch.switch}
+                  onChange={e => setNewSch(s => ({ ...s, switch: e.target.checked }))} />
+                Enable auto-start
+              </label>
+            </div>
+            <div className="flex gap-2">
+              <button onClick={handleAddSchedule} disabled={schSaving}
+                className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-violet-500/15 text-violet-400 text-xs font-medium
+                  border border-violet-500/20 hover:bg-violet-500/25 transition-colors disabled:opacity-50">
+                {schSaving ? <Spinner size={12} /> : <Save size={12} />} Save Schedule
+              </button>
+              <button onClick={() => setShowSchForm(false)}
+                className="px-4 py-2 rounded-xl bg-edge text-soft text-xs hover:text-snow transition-colors">
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+
+        {schLoading ? (
+          <div className="flex items-center justify-center py-10"><Spinner size={20} /></div>
+        ) : schedules.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-10 gap-2 text-center">
+            <CalendarClock size={22} className="text-dim" />
+            <p className="text-soft text-sm">No schedules yet</p>
+            <p className="text-dim text-xs max-w-xs">
+              Add a schedule to auto-start and auto-end sessions. All times are IST.
+            </p>
+          </div>
+        ) : (
+          <div>
+            {schedules.map((sch, idx) => (
+              <ScheduleRow
+                key={idx}
+                sch={sch}
+                index={idx}
+                onToggle={handleToggleSchedule}
+                onDelete={handleDeleteSchedule}
+                onSave={handleSaveSchedule}
+                saving={schSaving}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+---
+frontend/src/pages/CoursesPage.js
+---
+import { useEffect, useState } from "react";
+import { getCourses, getActiveSession } from "../api/client";
+import { useAuth } from "../context/AuthContext";
+import { Badge, Empty, Spinner } from "../components/UI";
+import { BookOpen, ChevronRight, Wifi, QrCode, Layers } from "lucide-react";
+
+const COURSE_COLORS = [
+  "bg-azure-500", "bg-jade-500", "bg-violet-500",
+  "bg-amber-500", "bg-rose-500",
+];
+
+export default function CoursesPage({ setActiveCourse }) {
+  const { user }   = useAuth();
+  const [courses,  setCourses]  = useState([]);
+  const [sessions, setSessions] = useState({});
+  const [loading,  setLoading]  = useState(true);
+
+  useEffect(() => {
+    async function load() {
+      try {
+        const res = await getCourses(user.user_id);
+        setCourses(res.data);
+
+        const sessionMap = {};
+        await Promise.all(res.data.map(async (c) => {
+          try {
+            const s = await getActiveSession(c.id);
+            sessionMap[c.id] = s.data;
+          } catch {
+            sessionMap[c.id] = null;
+          }
+        }));
+        setSessions(sessionMap);
+      } finally {
+        setLoading(false);
+      }
+    }
+    load();
+    const t = setInterval(load, 10000);
+    return () => clearInterval(t);
+  }, [user.user_id]);
+
+  if (loading) return (
+    <div className="flex items-center justify-center h-64">
+      <Spinner size={28} />
+    </div>
+  );
+
+  const ModeIcon = ({ mode }) => {
+    if (mode === "ble")    return <Wifi size={12} />;
+    if (mode === "qr")     return <QrCode size={12} />;
+    if (mode === "hybrid") return <Layers size={12} />;
+    return null;
+  };
+
+  return (
+    <div className="space-y-8">
+      <div className="animate-slide-up">
+        <h1 className="text-snow text-2xl font-bold tracking-tight">Courses</h1>
+        <p className="text-soft text-sm mt-1">
+          Select a course to manage attendance sessions.
+        </p>
+      </div>
+
+      <div className="animate-slide-up" style={{ animationDelay: "80ms" }}>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-snow font-semibold">Your Courses</h2>
+          <span className="text-soft text-xs font-mono">{courses.length} total</span>
+        </div>
+
+        {courses.length === 0 ? (
+          <Empty icon={BookOpen} title="No courses assigned"
+            sub="Courses will appear here once assigned by admin." />
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {courses.map((c, i) => {
+              const active = sessions[c.id];
+              return (
+                <div
+                  key={c.id}
+                  onClick={() => setActiveCourse(c)}
+                  className="animate-slide-up bg-card border border-edge hover:border-azure-500/40
+                    rounded-2xl p-5 cursor-pointer group transition-all duration-200 hover:shadow-glow"
+                  style={{ animationDelay: `${i * 80}ms` }}
+                >
+                  <div className={`w-full h-1 rounded-full mb-4 ${COURSE_COLORS[i % COURSE_COLORS.length]}`} />
+
+                  <div className="flex items-start justify-between mb-3">
+                    <div className="flex-1 min-w-0">
+                      <h3 className="text-snow font-semibold text-sm truncate">{c.name}</h3>
+                      <p className="text-soft text-xs mt-0.5 font-mono">ID: {c.id}</p>
+                    </div>
+                    <ChevronRight size={16} className="text-dim group-hover:text-azure-400 transition-colors mt-0.5 shrink-0" />
+                  </div>
+
+                  <div className="flex items-center justify-between">
+                    {active ? (
+                      <Badge label="LIVE" variant="live" />
+                    ) : (
+                      <Badge label="No Session" variant="ended" />
+                    )}
+                    {active && (
+                      <div className="flex items-center gap-1 text-dim text-xs">
+                        <ModeIcon mode={active.mode} />
+                        <span className="font-mono uppercase">{active.mode}</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+---
+frontend/src/pages/Login.js
+---
+import { useState } from "react";
+import { useAuth } from "../context/AuthContext";
+import { Mail, Lock, Eye, EyeOff, GraduationCap } from "lucide-react";
+import { Button, Input } from "../components/UI";
+
+export default function Login() {
+  const [email,    setEmail]    = useState("");
+  const [password, setPassword] = useState("");
+  const [showPwd,  setShowPwd]  = useState(false);
+  const [loading,  setLoading]  = useState(false);
+  const [error,    setError]    = useState("");
+  const { login } = useAuth();
+
+  const handle = async (e) => {
+    e.preventDefault();
+    setError("");
+    setLoading(true);
+    try {
+      await login(email, password);
+    } catch (err) {
+      setError(err.response?.data?.error || "Login failed. Check credentials.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-ink flex items-center justify-center p-4 relative overflow-hidden">
+      {/* Ambient glow */}
+      <div className="absolute top-1/4 left-1/2 -translate-x-1/2 w-96 h-96 bg-azure-500/8 rounded-full blur-3xl pointer-events-none" />
+      <div className="absolute bottom-1/4 right-1/4 w-64 h-64 bg-violet-500/6 rounded-full blur-3xl pointer-events-none" />
+
+      {/* Grid lines */}
+      <div className="absolute inset-0 bg-[linear-gradient(rgba(59,130,246,0.03)_1px,transparent_1px),linear-gradient(90deg,rgba(59,130,246,0.03)_1px,transparent_1px)] bg-[size:64px_64px]" />
+
+      <div className="relative w-full max-w-sm animate-slide-up">
+        {/* Card */}
+        <div className="bg-card border border-edge rounded-2xl p-8 shadow-float">
+          {/* Logo */}
+          <div className="flex flex-col items-center mb-8">
+            <div className="w-14 h-14 rounded-2xl bg-azure-500 flex items-center justify-center mb-4 shadow-glow">
+              <GraduationCap size={26} className="text-white" />
+            </div>
+            <h1 className="text-snow font-bold text-xl tracking-tight">Welcome back</h1>
+            <p className="text-soft text-sm mt-1">DIAMS · IIT Hyderabad</p>
+          </div>
+
+          <form onSubmit={handle} className="space-y-4">
+            {/* Email */}
+            <div className="space-y-1.5">
+              <label className="block text-xs text-soft font-medium">Email</label>
+              <div className="relative">
+                <Mail size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-dim" />
+                <input
+                  type="email" required
+                  value={email}
+                  onChange={e => setEmail(e.target.value)}
+                  placeholder="you@iith.ac.in"
+                  className="w-full bg-ink border border-edge rounded-xl text-sm text-snow placeholder:text-dim
+                    focus:outline-none focus:border-azure-500 focus:ring-1 focus:ring-azure-500/30 transition-all pl-10 pr-4 py-2.5"
+                />
+              </div>
+            </div>
+
+            {/* Password */}
+            <div className="space-y-1.5">
+              <label className="block text-xs text-soft font-medium">Password</label>
+              <div className="relative">
+                <Lock size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-dim" />
+                <input
+                  type={showPwd ? "text" : "password"} required
+                  value={password}
+                  onChange={e => setPassword(e.target.value)}
+                  placeholder="••••••••"
+                  className="w-full bg-ink border border-edge rounded-xl text-sm text-snow placeholder:text-dim
+                    focus:outline-none focus:border-azure-500 focus:ring-1 focus:ring-azure-500/30 transition-all pl-10 pr-10 py-2.5"
+                />
+                <button type="button" onClick={() => setShowPwd(!showPwd)}
+                  className="absolute right-3.5 top-1/2 -translate-y-1/2 text-dim hover:text-soft transition-colors">
+                  {showPwd ? <EyeOff size={14} /> : <Eye size={14} />}
+                </button>
+              </div>
+            </div>
+
+            {error && (
+              <div className="flex items-center gap-2 text-rose-400 text-xs bg-rose-500/10 border border-rose-500/20 rounded-xl px-3 py-2.5">
+                {error}
+              </div>
+            )}
+
+            <Button type="submit" loading={loading} disabled={!email || !password} className="w-full mt-2" size="lg">
+              Sign In
+            </Button>
+          </form>
+
+          {/* Demo credentials hint */}
+          <div className="mt-6 p-3 rounded-xl bg-white/3 border border-edge">
+            <p className="text-dim text-xs font-mono text-center">
+              Demo: profA@test.com / password123
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+---
+frontend/src/pages/ProfessorDashboard.js
+---
+import { useEffect, useState } from "react";
+import { getCourses, getActiveSession, getProfAnalytics } from "../api/client";
+import { useAuth } from "../context/AuthContext";
+import { StatCard, Badge, Empty, Spinner } from "../components/UI";
+import { BookOpen, Users, Activity, TrendingUp, ChevronRight, Wifi, QrCode, Layers } from "lucide-react";
+
+const COURSE_COLORS = [
+  "bg-azure-500", "bg-jade-500", "bg-violet-500",
+  "bg-amber-500", "bg-rose-500",
+];
+
+function getGreeting() {
+  const h = new Date().getHours();
+  if (h < 12) return "morning";
+  if (h < 17) return "afternoon";
+  return "evening";
+}
+
+const ModeIcon = ({ mode }) => {
+  if (mode === "ble")    return <Wifi size={12} />;
+  if (mode === "qr")     return <QrCode size={12} />;
+  if (mode === "hybrid") return <Layers size={12} />;
+  return null;
+};
+
+export default function ProfessorDashboard({ setPage, setActiveCourse }) {
+  const { user }   = useAuth();
+  const [courses,  setCourses]  = useState([]);
+  const [sessions, setSessions] = useState({});
+  const [loading,  setLoading]  = useState(true);
+  const [stats,    setStats]    = useState({
+    totalStudents: 0,
+    avgAttendance: 0,
+  });
+
+  useEffect(() => {
+    async function load() {
+      try {
+        const courseRes = await getCourses(user.user_id);
+        setCourses(courseRes.data);
+
+        // Active session status for each course
+        const sessionMap = {};
+        await Promise.all(courseRes.data.map(async (c) => {
+          try {
+            const s = await getActiveSession(c.id);
+            sessionMap[c.id] = s.data;
+          } catch {
+            sessionMap[c.id] = null;
+          }
+        }));
+        setSessions(sessionMap);
+
+        // Real avg attendance from prof analytics
+        try {
+          const analytics = await getProfAnalytics(user.user_id);
+          const data = analytics.data; // [{course_id, sessions, attendance, avg}]
+
+          const totalSessions  = data.reduce((s, c) => s + c.sessions, 0);
+          const totalAttendance = data.reduce((s, c) => s + c.attendance, 0);
+          const avgAttendance  = totalSessions > 0
+            ? totalAttendance / totalSessions
+            : 0;
+
+          // Unique students across all courses (rough: sum unique per course)
+          // We'll use enrollment-based count via getCourseStudents indirectly
+          // For the dashboard summary, we just show avg marks per session
+          setStats({
+            totalStudents: 0, // will be updated below
+            avgAttendance,
+          });
+        } catch {}
+
+      } finally {
+        setLoading(false);
+      }
+    }
+    load();
+  }, [user.user_id]);
+
+  const activeSessions = Object.values(sessions).filter(Boolean).length;
+
+  if (loading) return (
+    <div className="flex items-center justify-center h-64">
+      <Spinner size={28} />
+    </div>
+  );
+
+  return (
+    <div className="space-y-8">
+      {/* Greeting */}
+      <div className="animate-slide-up">
+        <h1 className="text-snow text-2xl font-bold tracking-tight">
+          Good {getGreeting()}, {user.name.split(" ")[0]} 👋
+        </h1>
+        <p className="text-soft text-sm mt-1">
+          Here's what's happening with your courses today.
+        </p>
+      </div>
+
+      {/* Stats */}
+      <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
+        <StatCard label="My Courses"      value={courses.length}                       icon={BookOpen}    color="azure"  delay={0}   />
+        <StatCard label="Active Sessions" value={activeSessions}                        icon={Activity}    color="jade"   delay={80}  />
+        <StatCard
+          label="Avg Attendance / Session"
+          value={stats.avgAttendance.toFixed(1)}
+          icon={TrendingUp}
+          color="amber"
+          delay={160}
+          sub="marks per session across all courses"
+        />
+      </div>
+
+      {/* Recent Courses — quick access */}
+      <div className="animate-slide-up" style={{ animationDelay: "200ms" }}>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-snow font-semibold">Your Courses</h2>
+          <button
+            onClick={() => setPage("courses")}
+            className="text-azure-400 text-xs hover:text-azure-300 transition-colors font-medium"
+          >
+            Manage →
+          </button>
+        </div>
+
+        {courses.length === 0 ? (
+          <Empty icon={BookOpen} title="No courses assigned"
+            sub="Courses will appear here once assigned by admin." />
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {courses.map((c, i) => {
+              const active = sessions[c.id];
+              return (
+                <div
+                  key={c.id}
+                  onClick={() => { setActiveCourse(c); setPage("courses"); }}
+                  className="animate-slide-up bg-card border border-edge hover:border-azure-500/40
+                    rounded-2xl p-5 cursor-pointer group transition-all duration-200 hover:shadow-glow"
+                  style={{ animationDelay: `${300 + i * 80}ms` }}
+                >
+                  <div className={`w-full h-1 rounded-full mb-4 ${COURSE_COLORS[i % COURSE_COLORS.length]}`} />
+
+                  <div className="flex items-start justify-between mb-3">
+                    <div className="flex-1 min-w-0">
+                      <h3 className="text-snow font-semibold text-sm truncate">{c.name}</h3>
+                      <p className="text-soft text-xs mt-0.5 font-mono">ID: {c.id}</p>
+                    </div>
+                    <ChevronRight size={16} className="text-dim group-hover:text-azure-400 transition-colors mt-0.5 shrink-0" />
+                  </div>
+
+                  <div className="flex items-center justify-between">
+                    {active ? (
+                      <Badge label="LIVE" variant="live" />
+                    ) : (
+                      <Badge label="No Session" variant="ended" />
+                    )}
+                    {active && (
+                      <div className="flex items-center gap-1 text-dim text-xs">
+                        <ModeIcon mode={active.mode} />
+                        <span className="font-mono uppercase">{active.mode}</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+---
+frontend/src/pages/Settings.js
+---
+import { useState } from "react";
+import { useAuth } from "../context/AuthContext";
+import { Server, User, Key, Save, CheckCircle2, AlertTriangle } from "lucide-react";
+import { Button, Input } from "../components/UI";
+
+export default function Settings() {
+  const { user } = useAuth();
+  const [apiUrl, setApiUrl] = useState(
+    localStorage.getItem("api_url") || "http://localhost:4040"
+  );
+  const [saved, setSaved] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState(null);
+
+  const saveUrl = () => {
+    localStorage.setItem("api_url", apiUrl);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+  };
+
+  const testConnection = async () => {
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const res = await fetch(`${apiUrl}/admin/stats`);
+      if (res.ok) setTestResult("success");
+      else setTestResult("error");
+    } catch {
+      setTestResult("error");
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  return (
+    <div className="space-y-8 max-w-xl">
+      <div className="animate-slide-up">
+        <h1 className="text-snow text-2xl font-bold tracking-tight">Settings</h1>
+        <p className="text-soft text-sm mt-1">Configure your connection and preferences</p>
+      </div>
+
+      {/* Profile card */}
+      <div className="bg-card border border-edge rounded-2xl p-6 animate-slide-up" style={{ animationDelay: "80ms" }}>
+        <div className="flex items-center gap-3 mb-4">
+          <User size={15} className="text-soft" />
+          <h2 className="text-snow font-semibold text-sm">Profile</h2>
+        </div>
+        <div className="space-y-3">
+          <InfoRow label="Name"  value={user?.name}  />
+          <InfoRow label="Role"  value={user?.role}  mono />
+          <InfoRow label="ID"    value={user?.user_id} mono />
+        </div>
+      </div>
+
+      {/* Server config */}
+      <div className="bg-card border border-edge rounded-2xl p-6 animate-slide-up" style={{ animationDelay: "160ms" }}>
+        <div className="flex items-center gap-3 mb-4">
+          <Server size={15} className="text-soft" />
+          <h2 className="text-snow font-semibold text-sm">Backend Server</h2>
+        </div>
+
+        <div className="space-y-4">
+          <div className="space-y-1.5">
+            <label className="block text-xs text-soft font-medium">API Base URL</label>
+            <input
+              value={apiUrl}
+              onChange={e => setApiUrl(e.target.value)}
+              className="w-full bg-ink border border-edge rounded-xl text-sm text-snow font-mono
+                focus:outline-none focus:border-azure-500 transition-all px-4 py-2.5"
+            />
+          </div>
+
+          {testResult === "success" && (
+            <div className="flex items-center gap-2 text-jade-400 text-xs bg-jade-500/10 border border-jade-500/20 rounded-xl px-3 py-2.5">
+              <CheckCircle2 size={13} /> Connected successfully
+            </div>
+          )}
+          {testResult === "error" && (
+            <div className="flex items-center gap-2 text-rose-400 text-xs bg-rose-500/10 border border-rose-500/20 rounded-xl px-3 py-2.5">
+              <AlertTriangle size={13} /> Could not connect — check URL and server status
+            </div>
+          )}
+
+          <div className="flex gap-3">
+            <Button onClick={testConnection} variant="secondary" loading={testing}>
+              Test Connection
+            </Button>
+            <Button onClick={saveUrl} variant="primary">
+              {saved ? <><CheckCircle2 size={13} /> Saved</> : <><Save size={13} /> Save</>}
+            </Button>
+          </div>
+        </div>
+      </div>
+
+      {/* API reference */}
+      <div className="bg-card border border-edge rounded-2xl p-6 animate-slide-up" style={{ animationDelay: "240ms" }}>
+        <div className="flex items-center gap-3 mb-4">
+          <Key size={15} className="text-soft" />
+          <h2 className="text-snow font-semibold text-sm">API Reference</h2>
+        </div>
+        <div className="space-y-2">
+          {[
+            ["POST", "/login",                "Authenticate user"],
+            ["GET",  "/courses/:profId",       "Get professor courses"],
+            ["POST", "/startSession",          "Start attendance session"],
+            ["POST", "/endSession/:id",        "End a session"],
+            ["GET",  "/activeSession",         "Get active session for course"],
+            ["GET",  "/getQR/:sessionId",      "Get refreshing QR token"],
+            ["GET",  "/attendance/:sessionId", "Get session attendance"],
+            ["POST", "/markAttendance",        "Mark student attendance"],
+            ["GET",  "/getMinor?major=",       "Get BLE minor value"],
+            ["GET",  "/validate",              "Validate BLE beacon"],
+            ["GET",  "/admin/stats",           "System-wide stats"],
+            ["GET",  "/analytics/course/:id",  "Per-course analytics"],
+            ["GET",  "/analytics/prof/:id",    "Professor analytics"],
+          ].map(([method, path, desc], i) => (
+            <div key={i} className="flex items-center gap-3 py-2 border-b border-edge last:border-0">
+              <span className={`text-xs font-mono font-bold w-10 shrink-0 ${
+                method === "POST" ? "text-amber-400" : "text-azure-400"
+              }`}>{method}</span>
+              <span className="text-snow text-xs font-mono flex-1 truncate">{path}</span>
+              <span className="text-dim text-xs hidden md:block">{desc}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function InfoRow({ label, value, mono }) {
+  return (
+    <div className="flex items-center justify-between py-2 border-b border-edge last:border-0">
+      <span className="text-soft text-xs">{label}</span>
+      <span className={`text-snow text-sm ${mono ? "font-mono" : ""}`}>{value ?? "—"}</span>
+    </div>
+  );
+}
+
+
+---
+frontend/src/pages/Students.js
+---
+/**
+ * Students.js — Professor "Students" page.
+ *
+ * Fixes:
+ *  - HistoryModal now uses /student/:id/history/:courseId which returns
+ *    lecture-based history (intersection rule). The heatmap is built from
+ *    lectures, not raw sessions, so the colour logic matches reality.
+ *  - The heatmap previously crashed because buildDayMap expected s.start_time
+ *    but the history endpoint returns l.scheduledTime.
+ *  - Active session tab now shows all sessions for the current lecture
+ *    (activeSessions[] from /activeSession) not just the primary one.
+ *  - Roster tab search works by name AND student ID.
+ */
+import { useState, useEffect, useCallback } from "react";
+import { getCourses, getActiveSession, getCourseStudents } from "../api/client";
+import { useAuth } from "../context/AuthContext";
+import { Search, Users, CheckCircle2, Clock, CalendarDays, X, Wifi, QrCode } from "lucide-react";
+import { Badge, Spinner, Empty, ProgressBar } from "../components/UI";
+import API from "../api/client";
+
+// ── IST helpers ───────────────────────────────────────────────────────────────
+
+function toZ(s) {
+  if (!s) return s;
+  return s.endsWith("Z") || s.includes("+") ? s : s + "Z";
+}
+
+function formatIST(utcStr) {
+  if (!utcStr) return "—";
+  return new Date(toZ(utcStr)).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
+}
+
+function formatISTTime(utcStr) {
+  if (!utcStr) return "—";
+  return new Date(toZ(utcStr)).toLocaleTimeString("en-IN", {
+    timeZone: "Asia/Kolkata",
+    hour: "2-digit", minute: "2-digit",
+  });
+}
+
+function toISTDate(utcStr) {
+  if (!utcStr) return null;
+  return new Date(new Date(toZ(utcStr)).toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
+}
+
+// ── Heatmap helpers ───────────────────────────────────────────────────────────
+// Now uses lecture-based history (each entry = one lecture).
+
+function buildDayMap(lectureHistory) {
+  const map = {};
+  for (const l of lectureHistory) {
+    // scheduledTime from the /history endpoint
+    const d = toISTDate(l.scheduledTime);
+    if (!d) continue;
+    const key = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+    if (!map[key]) map[key] = { total: 0, attended: 0 };
+    map[key].total += 1;
+    if (l.attended) map[key].attended += 1;
+  }
+  return map;
+}
+
+function buildCalendarWeeks(dayMap) {
+  if (Object.keys(dayMap).length === 0) return [];
+  const dateKeys  = Object.keys(dayMap).sort();
+  const firstDate = new Date(dateKeys[0] + "T00:00:00");
+  const today     = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
+  today.setHours(0, 0, 0, 0);
+
+  const start = new Date(firstDate);
+  start.setDate(start.getDate() - start.getDay()); // go back to Sunday
+
+  const end = new Date(today);
+  end.setDate(end.getDate() + (6 - end.getDay())); // forward to Saturday
+
+  const weeks = [];
+  let   week  = [];
+  const cur   = new Date(start);
+
+  while (cur <= end) {
+    const key = `${cur.getFullYear()}-${String(cur.getMonth()+1).padStart(2,"0")}-${String(cur.getDate()).padStart(2,"0")}`;
+    week.push({
+      key,
+      day:     cur.getDate(),
+      month:   cur.getMonth(),
+      isToday: cur.toDateString() === today.toDateString(),
+      data:    dayMap[key] || null,
+    });
+    if (cur.getDay() === 6) { weeks.push(week); week = []; }
+    cur.setDate(cur.getDate() + 1);
+  }
+  if (week.length > 0) weeks.push(week);
+  return weeks;
+}
+
+function cellColor(data) {
+  if (!data || data.total === 0) return "bg-edge";
+  const ratio = data.attended / data.total;
+  if (ratio === 0)    return "bg-rose-500/30";  // lecture day, didn't attend
+  if (ratio < 1)      return "bg-jade-500/40";  // partial (multi-session)
+  return "bg-jade-500";                          // fully attended
+}
+
+function cellTitle(data, key) {
+  if (!data || data.total === 0) return `${key} — no lecture`;
+  return `${key}: ${data.attended}/${data.total} lecture${data.total !== 1 ? "s" : ""} attended`;
+}
+
+// ── Student History Modal ─────────────────────────────────────────────────────
+
+function HistoryModal({ student, course, onClose }) {
+  const [loading, setLoading] = useState(true);
+  const [history, setHistory] = useState(null);
+  const [error,   setError]   = useState(null);
+  const [tooltip, setTooltip] = useState(null);
+
+  useEffect(() => {
+    API.get(`/student/${student.id}/history/${course.id}`)
+      .then(r => setHistory(r.data))
+      .catch(() => setError("Could not load attendance history."))
+      .finally(() => setLoading(false));
+  }, [student.id, course.id]);
+
+  const weeks   = history ? buildCalendarWeeks(buildDayMap(history.history || [])) : [];
+  const MONTHS  = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  const WEEKDAYS = ["S","M","T","W","T","F","S"];
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
+      <div className="bg-card border border-edge rounded-2xl w-full max-w-lg max-h-[85vh] flex flex-col">
+        {/* Header */}
+        <div className="px-5 py-4 border-b border-edge flex items-center justify-between shrink-0">
+          <div>
+            <p className="text-snow font-semibold text-sm">{student.name}</p>
+            <p className="text-soft text-xs font-mono mt-0.5">{course.name}</p>
+          </div>
+          <button onClick={onClose} className="text-dim hover:text-snow p-1 rounded-lg hover:bg-white/5 transition-colors">
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="overflow-y-auto flex-1 p-5 space-y-5">
+          {loading ? (
+            <div className="flex justify-center py-12"><Spinner size={24} /></div>
+          ) : error ? (
+            <p className="text-rose-400 text-sm text-center py-8">{error}</p>
+          ) : history ? (
+            <>
+              {/* Summary */}
+              <div className="grid grid-cols-3 gap-3">
+                {[
+                  { label: "Lectures Attended", value: history.attended },
+                  { label: "Total Lectures",    value: history.total    },
+                  {
+                    label: "Attendance %",
+                    value: <span className={`font-mono font-bold ${
+                      history.percentage >= 75 ? "text-jade-400"
+                      : history.percentage >= 60 ? "text-amber-400"
+                      : "text-rose-400"
+                    }`}>{history.percentage}%</span>,
+                  },
+                ].map((s, i) => (
+                  <div key={i} className="bg-ink border border-edge rounded-xl p-3 text-center">
+                    <p className="text-soft text-xs uppercase tracking-widest mb-1">{s.label}</p>
+                    <p className="text-snow text-lg font-bold">{s.value}</p>
+                  </div>
+                ))}
+              </div>
+
+              {/* Attendance progress bar */}
+              <ProgressBar value={history.percentage} max={100} size="lg" />
+
+              {/* Calendar heatmap */}
+              {weeks.length > 0 && (
+                <div>
+                  <p className="text-soft text-xs font-medium mb-2">Lecture calendar</p>
+                  {/* Weekday headers */}
+                  <div className="grid grid-cols-7 gap-0.5 mb-1">
+                    {WEEKDAYS.map((d, i) => (
+                      <div key={i} className="text-center text-dim text-xs">{d}</div>
+                    ))}
+                  </div>
+
+                  <div className="space-y-0.5 relative"
+                    onMouseLeave={() => setTooltip(null)}>
+                    {weeks.map((week, wi) => (
+                      <div key={wi} className="grid grid-cols-7 gap-0.5">
+                        {week.map((day, di) => (
+                          <div
+                            key={di}
+                            title={cellTitle(day.data, day.key)}
+                            onMouseEnter={e => {
+                              if (day.data) setTooltip({
+                                text: cellTitle(day.data, day.key),
+                                x: e.clientX, y: e.clientY,
+                              });
+                            }}
+                            className={`
+                              w-full aspect-square rounded-sm cursor-default transition-opacity
+                              ${cellColor(day.data)}
+                              ${day.isToday ? "ring-1 ring-azure-400" : ""}
+                            `}
+                          />
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Legend */}
+                  <div className="flex items-center gap-3 mt-2 text-xs text-dim">
+                    <div className="flex items-center gap-1"><div className="w-3 h-3 rounded-sm bg-jade-500" />Attended</div>
+                    <div className="flex items-center gap-1"><div className="w-3 h-3 rounded-sm bg-rose-500/30" />Absent</div>
+                    <div className="flex items-center gap-1"><div className="w-3 h-3 rounded-sm bg-edge" />No lecture</div>
+                  </div>
+                </div>
+              )}
+
+              {/* Per-lecture detail */}
+              {history.history?.length > 0 && (
+                <div>
+                  <p className="text-soft text-xs font-medium mb-2">Lecture-by-lecture breakdown</p>
+                  <div className="divide-y divide-edge border border-edge rounded-xl max-h-56 overflow-y-auto">
+                    {history.history.map((l, i) => (
+                      <div key={i} className="flex items-center gap-3 px-4 py-2.5 hover:bg-white/2 transition-colors">
+                        <div className={`w-2 h-2 rounded-full shrink-0 ${l.attended ? "bg-jade-400" : "bg-rose-400"}`} />
+                        <div className="flex-1 min-w-0">
+                          <p className="text-snow text-xs font-medium">
+                            {l.scheduledTime
+                              ? new Date(toZ(l.scheduledTime)).toLocaleDateString("en-IN", {
+                                  timeZone: "Asia/Kolkata",
+                                  day: "2-digit", month: "short",
+                                })
+                              : "—"}
+                          </p>
+                          {l.sessions?.length > 0 && (
+                            <p className="text-dim text-xs font-mono">
+                              {l.sessions.map(s =>
+                                `${s.method}: ${s.marked ? "✓" : "✗"}`
+                              ).join(" | ")}
+                            </p>
+                          )}
+                        </div>
+                        <span className={`text-xs font-medium ${l.attended ? "text-jade-400" : "text-rose-400"}`}>
+                          {l.attended ? "Present" : "Absent"}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </>
+          ) : null}
+        </div>
+      </div>
+
+      {/* Tooltip */}
+      {tooltip && (
+        <div
+          className="fixed z-[60] bg-ink border border-edge rounded-lg px-3 py-1.5 text-xs text-snow pointer-events-none"
+          style={{ left: tooltip.x + 12, top: tooltip.y - 24 }}
+        >
+          {tooltip.text}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Active session attendance panel ──────────────────────────────────────────
+
+function LiveAttendancePanel({ course, activeSessions }) {
+  const [records,    setRecords]    = useState([]);
+  const [query,      setQuery]      = useState("");
+  const [loadingRec, setLoadingRec] = useState(false);
+
+  const primarySession = activeSessions?.[0];
+
+  const fetchRecords = useCallback(async () => {
+    if (!primarySession) return;
+    setLoadingRec(true);
+    try {
+      const r = await API.get(`/attendance/${primarySession.session_id}`);
+      setRecords(r.data);
+    } catch {}
+    finally { setLoadingRec(false); }
+  }, [primarySession?.session_id]);
+
+  useEffect(() => {
+    fetchRecords();
+    const t = setInterval(fetchRecords, 3000);
+    return () => clearInterval(t);
+  }, [fetchRecords]);
+
+  const filtered = records.filter(r =>
+    (r.studentName || "").toLowerCase().includes(query.toLowerCase()) ||
+    String(r.student_id || r.student || "").includes(query)
+  );
+
+  const uniqueStudents = new Set(records.map(r => r.student_id || r.student)).size;
+  const lastRecord     = records.length > 0 ? records[records.length - 1] : null;
+
+  if (!primarySession) return (
+    <div className="flex items-center gap-2 bg-amber-500/10 border border-amber-500/20 rounded-xl px-4 py-3 mb-4">
+      <Clock size={14} className="text-amber-400 shrink-0" />
+      <p className="text-amber-300 text-sm">No active session for {course.name}.</p>
+    </div>
+  );
+
+  const ModeIcon = ({ method }) => {
+    if (method === "BLE" || method === "ble") return <Wifi size={11} className="text-azure-400" />;
+    if (method === "QRCode" || method === "qr") return <QrCode size={11} className="text-jade-400" />;
+    return null;
+  };
+
+  return (
+    <div className="space-y-4">
+      {/* Active sessions info */}
+      <div className="flex flex-wrap gap-2">
+        {activeSessions.map((s, i) => (
+          <div key={i} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-jade-500/10 border border-jade-500/20 text-xs">
+            <span className="w-1.5 h-1.5 rounded-full bg-jade-400 animate-pulse" />
+            <ModeIcon method={s.method} />
+            <span className="text-jade-400 font-mono">{s.method}</span>
+            <span className="text-dim">since {formatISTTime(s.startedAt)}</span>
+          </div>
+        ))}
+      </div>
+
+      {/* Stats row */}
+      <div className="grid grid-cols-3 gap-3">
+        <div className="bg-card border border-edge rounded-xl p-3 text-center">
+          <p className="text-soft text-xs uppercase tracking-widest mb-0.5">Checked In</p>
+          <p className="text-snow text-2xl font-bold">{uniqueStudents}</p>
+        </div>
+        <div className="bg-card border border-edge rounded-xl p-3 text-center">
+          <p className="text-soft text-xs uppercase tracking-widest mb-0.5">Total Marks</p>
+          <p className="text-snow text-2xl font-bold">{records.length}</p>
+        </div>
+        <div className="bg-card border border-edge rounded-xl p-3 text-center">
+          <p className="text-soft text-xs uppercase tracking-widest mb-0.5">Last Mark</p>
+          <p className="text-snow text-base font-bold font-mono">
+            {lastRecord ? formatISTTime(lastRecord.markedAt || lastRecord.timestamp) : "—"}
+          </p>
+        </div>
+      </div>
+
+      {/* Search */}
+      <div className="relative max-w-sm">
+        <Search size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-dim" />
+        <input
+          value={query}
+          onChange={e => setQuery(e.target.value)}
+          placeholder="Search by name or ID…"
+          className="w-full bg-card border border-edge rounded-xl text-sm text-snow placeholder:text-dim
+            focus:outline-none focus:border-azure-500 transition-all pl-10 pr-4 py-2.5"
+        />
+      </div>
+
+      {/* Log */}
+      <div className="bg-card border border-edge rounded-2xl overflow-hidden">
+        <div className="px-5 py-3 border-b border-edge flex items-center justify-between">
+          <h3 className="text-snow font-semibold text-sm">Live Attendance Log</h3>
+          <div className="flex items-center gap-2">
+            {loadingRec && <Spinner size={13} />}
+            <span className="text-soft text-xs font-mono">{filtered.length} entries</span>
+          </div>
+        </div>
+        {filtered.length === 0 ? (
+          <Empty icon={Users} title="No attendance yet"
+            sub="Records appear as students check in." />
+        ) : (
+          <div className="divide-y divide-edge max-h-72 overflow-y-auto">
+            {filtered.slice().reverse().map((r, i) => (
+              <div key={i} className="flex items-center gap-3 px-5 py-3 hover:bg-white/2 transition-colors">
+                <div className="w-8 h-8 rounded-xl bg-azure-500/15 flex items-center justify-center shrink-0">
+                  <span className="text-azure-400 text-xs font-bold">
+                    {(r.studentName || "?").charAt(0).toUpperCase()}
+                  </span>
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-snow text-sm font-medium">{r.studentName || `Student ${r.student_id || r.student}`}</p>
+                  <p className="text-soft text-xs font-mono">{formatIST(r.markedAt || r.timestamp)}</p>
+                </div>
+                <Badge label={r.verifiedVia || "Marked"} variant="live" />
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Main Students page ────────────────────────────────────────────────────────
+
+export default function Students() {
+  const { user }         = useAuth();
+  const [courses,        setCourses]        = useState([]);
+  const [selected,       setSelected]       = useState(null);
+  const [roster,         setRoster]         = useState([]);
+  const [activeSessions, setActiveSessions] = useState([]);
+  const [loading,        setLoading]        = useState(true);
+  const [loadingRoster,  setLoadingRoster]  = useState(false);
+  const [rosterQuery,    setRosterQuery]    = useState("");
+  const [activeTab,      setActiveTab]      = useState("live"); // "live" | "roster"
+  const [viewStudent,    setViewStudent]    = useState(null);
+
+  // ── Load courses ──────────────────────────────────────────────────────────
+  useEffect(() => {
+    getCourses(user.user_id)
+      .then(r => {
+        setCourses(r.data);
+        if (r.data.length > 0) setSelected(r.data[0]);
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [user.user_id]);
+
+  // ── Poll active sessions for selected course ───────────────────────────────
+  useEffect(() => {
+    if (!selected) return;
+    const poll = async () => {
+      try {
+        const r = await getActiveSession(selected.id);
+        setActiveSessions(r.data?.activeSessions || (r.data?.session_id ? [r.data] : []));
+      } catch {
+        setActiveSessions([]);
+      }
+    };
+    poll();
+    const t = setInterval(poll, 5000);
+    return () => clearInterval(t);
+  }, [selected?.id]);
+
+  // ── Load roster for selected course ───────────────────────────────────────
+  useEffect(() => {
+    if (!selected) return;
+    setLoadingRoster(true);
+    getCourseStudents(selected.id)
+      .then(r => setRoster(r.data))
+      .catch(() => setRoster([]))
+      .finally(() => setLoadingRoster(false));
+  }, [selected?.id]);
+
+  const filteredRoster = roster.filter(s =>
+    s.name.toLowerCase().includes(rosterQuery.toLowerCase()) ||
+    String(s.id || s._id).toLowerCase().includes(rosterQuery.toLowerCase())
+  );
+
+  if (loading) return (
+    <div className="flex items-center justify-center h-64"><Spinner size={28} /></div>
+  );
+
+  return (
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="animate-slide-up">
+        <h1 className="text-snow text-2xl font-bold tracking-tight">Students</h1>
+        <p className="text-soft text-sm mt-1">Live session attendance and per-student lecture history</p>
+      </div>
+
+      {/* Course selector */}
+      <div className="flex flex-wrap gap-2 animate-slide-up" style={{ animationDelay: "60ms" }}>
+        {courses.map(c => (
+          <button key={c.id}
+            onClick={() => { setSelected(c); setRosterQuery(""); setActiveTab("live"); }}
+            className={`px-4 py-2 rounded-xl text-sm font-medium transition-all border
+              ${selected?.id === c.id
+                ? "bg-azure-500/15 text-azure-400 border-azure-500/30"
+                : "bg-card text-soft border-edge hover:text-snow hover:border-dim"}`}
+          >
+            {c.name}
+            {c.isTA && <span className="ml-1.5 text-amber-400 text-xs">[TA]</span>}
+          </button>
+        ))}
+      </div>
+
+      {selected && (
+        <div className="animate-slide-up" style={{ animationDelay: "120ms" }}>
+          {/* Tab switcher */}
+          <div className="flex gap-1 mb-5 border-b border-edge">
+            {[
+              { id: "live",   label: "Live Session" },
+              { id: "roster", label: `Roster (${roster.length})` },
+            ].map(tab => (
+              <button key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={`px-4 py-2.5 text-sm font-medium transition-colors border-b-2 -mb-px
+                  ${activeTab === tab.id
+                    ? "border-azure-400 text-azure-400"
+                    : "border-transparent text-soft hover:text-snow"}`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Live tab */}
+          {activeTab === "live" && (
+            <LiveAttendancePanel
+              course={selected}
+              activeSessions={activeSessions}
+            />
+          )}
+
+          {/* Roster tab */}
+          {activeTab === "roster" && (
+            <div className="bg-card border border-edge rounded-2xl overflow-hidden">
+              <div className="px-5 py-4 border-b border-edge flex items-center justify-between">
+                <h2 className="text-snow font-semibold text-sm">Enrolled Students</h2>
+                <div className="flex items-center gap-3">
+                  {loadingRoster && <Spinner size={14} />}
+                  <span className="text-soft text-xs font-mono">{filteredRoster.length} students</span>
+                </div>
+              </div>
+
+              {/* Search */}
+              <div className="px-5 py-3 border-b border-edge">
+                <div className="relative max-w-sm">
+                  <Search size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-dim" />
+                  <input
+                    value={rosterQuery}
+                    onChange={e => setRosterQuery(e.target.value)}
+                    placeholder="Search by name or ID…"
+                    className="w-full bg-ink border border-edge rounded-xl text-sm text-snow placeholder:text-dim
+                      focus:outline-none focus:border-azure-500 transition-all pl-10 pr-4 py-2"
+                  />
+                </div>
+              </div>
+
+              {filteredRoster.length === 0 ? (
+                <Empty icon={Users} title="No students found"
+                  sub={roster.length === 0 ? "No students enrolled." : "No matching students."} />
+              ) : (
+                <div className="divide-y divide-edge max-h-[500px] overflow-y-auto">
+                  {filteredRoster.map(s => (
+                    <button
+                      key={s.id || s._id}
+                      onClick={() => setViewStudent(s)}
+                      className="w-full flex items-center gap-4 px-5 py-3.5 hover:bg-white/2 transition-colors text-left group"
+                    >
+                      <div className="w-9 h-9 rounded-xl bg-violet-500/15 flex items-center justify-center shrink-0 border border-violet-500/20 group-hover:border-violet-500/40 transition-colors">
+                        <span className="text-violet-400 text-sm font-bold">
+                          {(s.name || "?").charAt(0).toUpperCase()}
+                        </span>
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-snow text-sm font-medium">{s.name}</p>
+                        <p className="text-soft text-xs font-mono mt-0.5">ID: {s.id || s._id}</p>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <span className="text-dim text-xs group-hover:text-violet-400 transition-colors">
+                          View history
+                        </span>
+                        <CalendarDays size={14} className="text-dim group-hover:text-violet-400 transition-colors" />
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* History modal */}
+      {viewStudent && selected && (
+        <HistoryModal
+          student={viewStudent}
+          course={selected}
+          onClose={() => setViewStudent(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+---
+frontend/src/components/Layout.js
+---
+import { useAuth } from "../context/AuthContext";
+import {
+  LayoutDashboard, BookOpen, BarChart3, Shield,
+  LogOut, GraduationCap, ChevronLeft, ChevronRight,
+  Bell, Users,
+} from "lucide-react";
+import { useState } from "react";
+
+const NAV_PROF = [
+  { icon: LayoutDashboard, label: "Dashboard", id: "dashboard" },
+  { icon: BookOpen,         label: "Courses",   id: "courses"   },
+  { icon: Users,            label: "Students",  id: "students"  },
+  { icon: BarChart3,        label: "Analytics", id: "analytics" },
+];
+
+const NAV_ADMIN = [
+  { icon: LayoutDashboard, label: "Overview",  id: "dashboard" },
+  { icon: BookOpen,         label: "Courses",   id: "courses"   },
+  { icon: Users,            label: "Students",  id: "students"  },
+  { icon: BarChart3,        label: "Analytics", id: "analytics" },
+  { icon: Shield,           label: "Admin",     id: "admin"     },
+];
+
+export default function Layout({ page, setPage, children }) {
+  const { user, logout } = useAuth();
+  const [collapsed, setCollapsed] = useState(false);
+
+  const nav = user?.role === "admin" ? NAV_ADMIN : NAV_PROF;
+
+  // Header label — find from nav, fallback gracefully
+  const pageLabel = nav.find(n => n.id === page)?.label ?? "Dashboard";
+
+  return (
+    <div className="flex h-screen bg-ink overflow-hidden">
+      <aside className={`flex flex-col bg-card border-r border-edge shrink-0 transition-all duration-300 ${collapsed ? "w-16" : "w-56"}`}>
+        <div className={`flex items-center gap-3 px-4 py-5 border-b border-edge ${collapsed ? "justify-center" : ""}`}>
+          <div className="w-8 h-8 rounded-xl bg-azure-500 flex items-center justify-center shrink-0 shadow-glow">
+            <GraduationCap size={15} className="text-white" />
+          </div>
+          {!collapsed && (
+            <div className="min-w-0">
+              <p className="text-snow font-bold text-sm leading-none">DIAMS</p>
+              <p className="text-soft text-xs mt-0.5">IIT Hyderabad</p>
+            </div>
+          )}
+        </div>
+
+        <nav className="flex-1 p-2 space-y-0.5 mt-1">
+          {nav.map(({ icon: Icon, label, id }) => (
+            <button key={id} onClick={() => setPage(id)} title={collapsed ? label : ""}
+              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all duration-150
+                ${page === id ? "nav-active" : "text-soft hover:text-snow hover:bg-white/5"}
+                ${collapsed ? "justify-center" : ""}`}>
+              <Icon size={16} className="shrink-0" />
+              {!collapsed && label}
+            </button>
+          ))}
+        </nav>
+
+        <div className="p-2 border-t border-edge space-y-0.5">
+          {!collapsed && (
+            <div className="px-3 py-2.5 rounded-xl bg-white/4 mb-1">
+              <p className="text-snow text-xs font-medium truncate">{user?.name}</p>
+              <p className="text-soft text-xs truncate capitalize">
+                {user?.role}
+                {user?.taCourseIds?.length > 0 && (
+                  <span className="ml-1 text-violet-400">(+TA)</span>
+                )}
+              </p>
+            </div>
+          )}
+          <button onClick={logout} title={collapsed ? "Log out" : ""}
+            className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm text-soft hover:text-rose-400 hover:bg-rose-500/8 transition-all ${collapsed ? "justify-center" : ""}`}>
+            <LogOut size={15} className="shrink-0" />
+            {!collapsed && "Log out"}
+          </button>
+          <button onClick={() => setCollapsed(!collapsed)}
+            className="w-full flex items-center justify-center py-2 text-dim hover:text-soft transition-colors">
+            {collapsed ? <ChevronRight size={14} /> : <ChevronLeft size={14} />}
+          </button>
+        </div>
+      </aside>
+
+      <div className="flex-1 flex flex-col overflow-hidden">
+        <header className="flex items-center justify-between px-6 py-4 border-b border-edge bg-card/50 backdrop-blur-sm shrink-0">
+          <div>
+            <h1 className="text-snow font-semibold text-sm capitalize">{pageLabel}</h1>
+            <p className="text-soft text-xs mt-0.5">
+              {new Date().toLocaleDateString("en-IN", { weekday: "long", month: "long", day: "numeric" })}
+            </p>
+          </div>
+          <div className="flex items-center gap-3">
+            <button
+              className="w-8 h-8 rounded-xl bg-edge flex items-center justify-center text-soft hover:text-snow transition-colors"
+              onClick={() => alert("Notifications coming soon")}
+            >
+              <Bell size={14} />
+            </button>
+            <div className="w-8 h-8 rounded-xl bg-azure-500 flex items-center justify-center text-xs font-bold text-white select-none">
+              {user?.name?.[0] ?? "P"}
+            </div>
+          </div>
+        </header>
+        <main className="flex-1 overflow-y-auto p-6">{children}</main>
+      </div>
+    </div>
+  );
+}
+
+---
+frontend/src/components/UI.js
+---
+import { Loader2, X } from "lucide-react";
+
+// ── Stat Card ─────────────────────────────────────────────────────────────────
+export function StatCard({ label, value, sub, icon: Icon, color = "azure", delay = 0 }) {
+  const palette = {
+    azure:  { bg: "bg-azure-500/10",  text: "text-azure-400",  border: "border-azure-500/20"  },
+    jade:   { bg: "bg-jade-500/10",   text: "text-jade-400",   border: "border-jade-500/20"   },
+    amber:  { bg: "bg-amber-500/10",  text: "text-amber-400",  border: "border-amber-500/20"  },
+    rose:   { bg: "bg-rose-500/10",   text: "text-rose-400",   border: "border-rose-500/20"   },
+    violet: { bg: "bg-violet-500/10", text: "text-violet-400", border: "border-violet-500/20" },
+  }[color];
+
+  return (
+    <div
+      className="animate-slide-up bg-card border border-edge rounded-2xl p-5 flex flex-col gap-3"
+      style={{ animationDelay: `${delay}ms` }}
+    >
+      <div className="flex items-start justify-between">
+        <p className="text-soft text-xs font-medium uppercase tracking-widest">{label}</p>
+        {Icon && (
+          <div className={`w-8 h-8 rounded-xl flex items-center justify-center ${palette.bg} ${palette.border} border`}>
+            <Icon size={15} className={palette.text} />
+          </div>
+        )}
+      </div>
+      <div>
+        <p className="text-snow text-3xl font-bold leading-none tracking-tight">{value}</p>
+        {sub && <p className="text-soft text-xs mt-1.5">{sub}</p>}
+      </div>
+    </div>
+  );
+}
+
+// ── Badge ─────────────────────────────────────────────────────────────────────
+export function Badge({ label, variant = "default" }) {
+  const map = {
+    default: "bg-white/8 text-mist",
+    ble:     "bg-azure-500/15 text-azure-400 border border-azure-500/20",
+    qr:      "bg-jade-500/15 text-jade-400 border border-jade-500/20",
+    hybrid:  "bg-violet-500/15 text-violet-400 border border-violet-500/20",
+    manual:  "bg-amber-500/15 text-amber-400 border border-amber-500/20",
+    live:    "bg-jade-500/15 text-jade-400 border border-jade-500/25",
+    ended:   "bg-white/5 text-soft",
+    good:    "bg-jade-500/15 text-jade-400",
+    warn:    "bg-amber-500/15 text-amber-400",
+    danger:  "bg-rose-500/15 text-rose-400",
+    prof:    "bg-violet-500/15 text-violet-400",
+    admin:   "bg-rose-500/15 text-rose-400",
+    ta:      "bg-amber-500/15 text-amber-400 border border-amber-500/20",
+  };
+  return (
+    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium font-mono ${map[variant] ?? map.default}`}>
+      {variant === "live" && <span className="w-1.5 h-1.5 rounded-full bg-jade-400 animate-pulse" />}
+      {label}
+    </span>
+  );
+}
+
+// ── Progress bar ──────────────────────────────────────────────────────────────
+export function ProgressBar({ value, max = 100, size = "sm" }) {
+  const pct   = Math.min(100, Math.max(0, (value / max) * 100));
+  const color = pct >= 75 ? "bg-jade-500" : pct >= 60 ? "bg-amber-500" : "bg-rose-500";
+  const h     = size === "sm" ? "h-1.5" : "h-2.5";
+  return (
+    <div className={`w-full ${h} rounded-full bg-edge overflow-hidden`}>
+      <div className={`h-full rounded-full transition-all duration-700 ${color}`} style={{ width: `${pct}%` }} />
+    </div>
+  );
+}
+
+// ── Button ────────────────────────────────────────────────────────────────────
+export function Button({ children, onClick, variant = "primary", size = "md", disabled, loading, className = "", type = "button" }) {
+  const base = "inline-flex items-center justify-center gap-2 font-medium rounded-xl transition-all duration-150 disabled:opacity-40 disabled:cursor-not-allowed select-none";
+  const variants = {
+    primary:   "bg-azure-500 hover:bg-azure-400 text-white shadow-glow",
+    secondary: "bg-edge hover:bg-dim/60 text-snow border border-edge",
+    ghost:     "hover:bg-white/5 text-soft hover:text-snow",
+    danger:    "bg-rose-500/15 hover:bg-rose-500/25 text-rose-400 border border-rose-500/20",
+    jade:      "bg-jade-500/15 hover:bg-jade-500/25 text-jade-400 border border-jade-500/20",
+    violet:    "bg-violet-500/15 hover:bg-violet-500/25 text-violet-400 border border-violet-500/20",
+  };
+  const sizes = {
+    xs: "px-2.5 py-1.5 text-xs",
+    sm: "px-3 py-2 text-xs",
+    md: "px-4 py-2.5 text-sm",
+    lg: "px-5 py-3 text-sm",
+  };
+  return (
+    <button type={type} onClick={onClick} disabled={disabled || loading}
+      className={`${base} ${variants[variant] ?? variants.primary} ${sizes[size]} ${className}`}>
+      {loading && <Loader2 size={14} className="animate-spin" />}
+      {children}
+    </button>
+  );
+}
+
+// ── Input ─────────────────────────────────────────────────────────────────────
+export function Input({ label, icon: Icon, ...props }) {
+  return (
+    <div className="space-y-1.5">
+      {label && <label className="block text-xs text-soft font-medium">{label}</label>}
+      <div className="relative">
+        {Icon && <Icon size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-dim" />}
+        <input
+          {...props}
+          className={`w-full bg-ink border border-edge rounded-xl text-sm text-snow placeholder:text-dim
+            focus:outline-none focus:border-azure-500 focus:ring-1 focus:ring-azure-500/30 transition-all
+            ${Icon ? "pl-10 pr-4" : "px-4"} py-2.5`}
+        />
+      </div>
+    </div>
+  );
+}
+
+// ── Select ────────────────────────────────────────────────────────────────────
+export function Select({ label, children, ...props }) {
+  return (
+    <div className="space-y-1.5">
+      {label && <label className="block text-xs text-soft font-medium">{label}</label>}
+      <select
+        {...props}
+        className="w-full bg-ink border border-edge rounded-xl text-sm text-snow px-4 py-2.5
+          focus:outline-none focus:border-azure-500 transition-all appearance-none cursor-pointer"
+      >
+        {children}
+      </select>
+    </div>
+  );
+}
+
+// ── Modal ─────────────────────────────────────────────────────────────────────
+export function Modal({ title, subtitle, onClose, children, maxWidth = "max-w-lg" }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
+      <div className={`bg-card border border-edge rounded-2xl w-full ${maxWidth} max-h-[88vh] flex flex-col`}>
+        <div className="px-5 py-4 border-b border-edge flex items-center justify-between shrink-0">
+          <div>
+            <p className="text-snow font-semibold text-sm">{title}</p>
+            {subtitle && <p className="text-soft text-xs font-mono mt-0.5">{subtitle}</p>}
+          </div>
+          <button onClick={onClose} className="text-dim hover:text-snow transition-colors p-1 rounded-lg hover:bg-white/5">
+            <X size={16} />
+          </button>
+        </div>
+        <div className="overflow-y-auto flex-1">
+          {children}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Empty state ───────────────────────────────────────────────────────────────
+export function Empty({ icon: Icon, title, sub }) {
+  return (
+    <div className="flex flex-col items-center justify-center py-16 gap-3 text-center">
+      {Icon && <div className="w-14 h-14 rounded-2xl bg-edge flex items-center justify-center"><Icon size={24} className="text-dim" /></div>}
+      <p className="text-snow font-medium">{title}</p>
+      {sub && <p className="text-soft text-sm max-w-xs">{sub}</p>}
+    </div>
+  );
+}
+
+// ── Spinner ───────────────────────────────────────────────────────────────────
+export function Spinner({ size = 20 }) {
+  return <Loader2 size={size} className="animate-spin text-azure-400" />;
+}
+
+// ── Section header ────────────────────────────────────────────────────────────
+export function SectionHeader({ title, action }) {
+  return (
+    <div className="flex items-center justify-between mb-4">
+      <h2 className="text-snow font-semibold text-base">{title}</h2>
+      {action}
+    </div>
+  );
+}
+
+// ── AttendancePct ─────────────────────────────────────────────────────────────
+export function AttendancePct({ value, small = false }) {
+  const color = value >= 75 ? "text-jade-400" : value >= 60 ? "text-amber-400" : "text-rose-400";
+  const size  = small ? "text-xs" : "text-sm";
+  return <span className={`font-mono font-bold ${size} ${color}`}>{Number(value).toFixed(0)}%</span>;
+}
+
+---
+frontend/src/api/client.js
+---
+import axios from "axios";
+
+const API = axios.create({
+  baseURL: localStorage.getItem("api_url") || "http://localhost:4040",
+  timeout: 10000,
+});
+
+// Token lives in sessionStorage (closes with browser tab)
+API.interceptors.request.use(cfg => {
+  const token = sessionStorage.getItem("diams_token");
+  if (token) cfg.headers.Authorization = `Bearer ${token}`;
+  return cfg;
+});
+
+// ── Auth ──────────────────────────────────────────────────────────────────────
+export const login = (data) => API.post("/login", data);
+
+// ── Courses ───────────────────────────────────────────────────────────────────
+export const getCourses        = (profId)   => API.get(`/courses/${profId}`);
+export const getAllCourses      = ()         => API.get("/admin/courses");
+export const createCourse      = (data)     => API.post("/courses", data);
+export const updateCourse      = (id, data) => API.put(`/courses/${id}`, data);
+export const deleteCourse      = (id)       => API.delete(`/courses/${id}`);
+export const getCourseStudents = (courseId) => API.get(`/course/${courseId}/students`);
+
+// ── Schedules ─────────────────────────────────────────────────────────────────
+export const getCourseSchedules = (courseId)            => API.get(`/courses/${courseId}/schedules`);
+export const addSchedule        = (courseId, data)      => API.post(`/courses/${courseId}/schedule`, data);
+export const updateSchedule     = (courseId, idx, data) => API.patch(`/courses/${courseId}/schedule/${idx}`, data);
+export const deleteScheduleItem = (courseId, idx)       => API.delete(`/courses/${courseId}/schedule/${idx}`);
+export const replaceSchedules   = (courseId, list)      => API.put(`/courses/${courseId}/schedule`, { schedules: list });
+
+// ── TA management (admin) ─────────────────────────────────────────────────────
+export const addTA    = (courseId, studentId) => API.post(`/admin/courses/${courseId}/tas`, { student_id: studentId });
+export const removeTA = (courseId, studentId) => API.delete(`/admin/courses/${courseId}/tas/${studentId}`);
+
+// ── Sessions ──────────────────────────────────────────────────────────────────
+export const startSession     = (data)      => API.post("/startSession", data);
+export const endSession       = (sessionId) => API.post(`/endSession/${sessionId}`);
+export const getActiveSession = (courseId)  => API.get(`/activeSession?course_id=${courseId}`);
+
+// ── BLE / QR microservice ─────────────────────────────────────────────────────
+// BLE: student app sends scanned beacons, backend validates + marks attendance
+export const bleValidate  = (data) => API.post("/ble/validate", data);
+// BLE: ESP32 requests new minor from backend
+export const getMinor     = (major) => API.get(`/getMinor?major=${major}`);
+// QR: get current hash for display (prof screen)
+export const getQR        = (sessionId) => API.get(`/getQR/${sessionId}`);
+// QR: student app sends scanned hash, backend validates + marks attendance
+export const qrValidate   = (data) => API.post("/qr/validate", data);
+// Legacy
+export const validateBeacon = (major, minor) => API.get(`/validate?major=${major}&minor=${minor}`);
+
+// ── Attendance ────────────────────────────────────────────────────────────────
+export const getAttendance        = (sessionId) => API.get(`/attendance/${sessionId}`);
+export const markAttendance       = (data)      => API.post("/markAttendance", data);
+export const manualAttendance     = (data)      => API.post("/manualAttendance", data);
+export const manualAttendanceBulk = (data)      => API.post("/manualAttendance/bulk", data);
+
+// ── Analytics ─────────────────────────────────────────────────────────────────
+export const getAdminStats            = ()                    => API.get("/admin/stats");
+export const getAdminAnalytics        = ()                    => API.get("/analytics/admin");
+export const getCourseAnalytics       = (courseId)            => API.get(`/analytics/course/${courseId}`);
+export const getCourseStudentStats    = (courseId)            => API.get(`/analytics/course/${courseId}/students`);
+export const getProfAnalytics         = (profId)              => API.get(`/analytics/prof/${profId}`);
+export const getStudentCourseHistory  = (studentId, courseId) => API.get(`/student/${studentId}/history/${courseId}`);
+export const getAtRiskStudents        = (profId)              => API.get(`/analytics/at-risk/${profId}`);
+export const getAdminStudentAnalytics = (studentId)           => API.get(`/admin/student/${studentId}/analytics`);
+
+// ── Admin – Users ─────────────────────────────────────────────────────────────
+export const getAllUsers     = () => API.get("/admin/users");
+export const createProfessor = (data) => API.post("/admin/professors", data);
+export const deleteProfessor = (id)   => API.delete(`/admin/professors/${id}`);
+export const createStudent   = (data) => API.post("/admin/students", data);
+export const deleteStudent   = (id)   => API.delete(`/admin/students/${id}`);
+
+// ── Admin – Enrollment ────────────────────────────────────────────────────────
+export const enrollStudent   = (data) => API.post("/admin/enroll", data);
+export const enrollBulk      = (data) => API.post("/admin/enroll/bulk", data);
+export const unenrollStudent = (data) => API.post("/admin/unenroll", data);
+export const getCourseEnrolled = (cId) => API.get(`/admin/enrollments/${cId}`);
+
+// ── Admin – CSV bulk operations ───────────────────────────────────────────────
+export const csvBulkCreate = (formData) => API.post("/admin/csv/bulk-create", formData, {
+  headers: { "Content-Type": "multipart/form-data" },
+});
+export const csvBulkDelete = (formData) => API.post("/admin/csv/bulk-delete", formData, {
+  headers: { "Content-Type": "multipart/form-data" },
+});
+
+export default API;
+
+---
+frontend/src/context/AuthContext.js
+---
+/**
+ * AuthContext — session-scoped auth.
+ *
+ * We store the token in sessionStorage (not localStorage) so that closing
+ * the browser tab / window clears the session and the user must log in again.
+ * The API base-URL preference (non-sensitive) stays in localStorage.
+ */
+import { createContext, useContext, useState, useEffect } from "react";
+import { login as apiLogin } from "../api/client";
+
+const AuthContext = createContext(null);
+
+const USER_KEY  = "diams_user";
+const TOKEN_KEY = "diams_token";
+
+export function AuthProvider({ children }) {
+  const [user,    setUser]    = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    // Restore session only from sessionStorage so closing the browser tab
+    // forces a fresh login — localStorage persists across browser restarts.
+    const stored = sessionStorage.getItem(USER_KEY);
+    const token  = sessionStorage.getItem(TOKEN_KEY);
+    if (stored && token) {
+      try { setUser(JSON.parse(stored)); } catch {}
+    }
+    setLoading(false);
+  }, []);
+
+  const login = async (email, password) => {
+    const res = await apiLogin({ email, password });
+    const u   = res.data;
+    sessionStorage.setItem(USER_KEY,  JSON.stringify(u));
+    if (u.token) sessionStorage.setItem(TOKEN_KEY, u.token);
+    setUser(u);
+    return u;
+  };
+
+  const logout = () => {
+    sessionStorage.removeItem(USER_KEY);
+    sessionStorage.removeItem(TOKEN_KEY);
+    setUser(null);
+  };
+
+  return (
+    <AuthContext.Provider value={{ user, login, logout, loading }}>
+      {!loading && children}
+    </AuthContext.Provider>
+  );
+}
+
+export const useAuth = () => useContext(AuthContext);
+
+---
+frontend/src/context/SchedulerContext.js
+---
+import { createContext, useContext, useEffect, useRef } from "react";
+import { useAuth } from "./AuthContext";
+import { getCourses, getActiveSession, startSession, endSession, getCourseSchedules } from "../api/client";
+
+const SchedulerContext = createContext(null);
+
+// ── Timezone helpers ──────────────────────────────────────────────────────────
+function nowIST() {
+  const istString = new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" });
+  const ist = new Date(istString);
+  return { dayIdx: ist.getDay(), nowMin: ist.getHours() * 60 + ist.getMinutes() };
+}
+
+const DAY_TO_IDX = {
+  Sunday: 0, Monday: 1, Tuesday: 2, Wednesday: 3,
+  Thursday: 4, Friday: 5, Saturday: 6,
+};
+
+// ── Provider ──────────────────────────────────────────────────────────────────
+export function SchedulerProvider({ children }) {
+  const { user }   = useAuth();
+  const stateRef   = useRef({ courses: [], scheduleCache: {} });
+
+  useEffect(() => {
+    // Only run for prof and TA roles
+    if (!user || (user.role !== "prof" && user.role !== "ta")) return;
+
+    async function tick() {
+      // 1. Refresh course list
+      try {
+        const res = await getCourses(user.user_id);
+        stateRef.current.courses = res.data;
+      } catch {
+        return;
+      }
+
+      const { dayIdx, nowMin } = nowIST();
+
+      for (const course of stateRef.current.courses) {
+        // 2. Fetch schedules from DB (cached per-course, refresh every 5 min)
+        const cacheKey    = course.id || course._id;
+        const cacheEntry  = stateRef.current.scheduleCache[cacheKey];
+        const CACHE_TTL   = 5 * 60 * 1000;
+        let schedules     = cacheEntry?.data || [];
+
+        if (!cacheEntry || Date.now() - cacheEntry.fetchedAt > CACHE_TTL) {
+          try {
+            const r = await getCourseSchedules(cacheKey);
+            schedules = r.data || [];
+            stateRef.current.scheduleCache[cacheKey] = { data: schedules, fetchedAt: Date.now() };
+          } catch {
+            schedules = [];
+          }
+        }
+
+        if (!schedules.length) continue;
+
+        // 3. Check for active session
+        let activeSess = null;
+        try {
+          const r = await getActiveSession(cacheKey);
+          if (r.data?.session_id) activeSess = r.data;
+        } catch {}
+
+        // 4. Find a schedule window that is active right now
+        const activeWindow = schedules.find(sch => {
+          if (!sch.switch) return false; // only auto-start if switch is ON
+          const schDayIdx = DAY_TO_IDX[sch.scheduledDay];
+          if (schDayIdx !== dayIdx) return false;
+          const [sh, sm] = sch.startTime.split(":").map(Number);
+          const [eh, em] = sch.endTime.split(":").map(Number);
+          const startMin = sh * 60 + sm;
+          const endMin   = eh * 60 + em;
+          return nowMin >= startMin && nowMin < endMin;
+        });
+
+        const schedulerKey = `scheduler_sess_${cacheKey}`;
+
+        if (activeWindow && !activeSess) {
+          // Should be running — start it
+          try {
+            const res = await startSession({
+              course_id: cacheKey,
+              mode:      activeWindow.method?.toLowerCase() || "ble",
+            });
+            if (res.data?.session_id) {
+              sessionStorage.setItem(schedulerKey, String(res.data.session_id));
+            }
+          } catch {}
+
+        } else if (!activeWindow && activeSess) {
+          // Outside window — end only if this scheduler started it
+          const schedulerSessId = sessionStorage.getItem(schedulerKey);
+          if (schedulerSessId && String(activeSess.session_id) === schedulerSessId) {
+            try { await endSession(activeSess.session_id); } catch {}
+            sessionStorage.removeItem(schedulerKey);
+          }
+
+        } else if (activeWindow && activeSess) {
+          const schedulerSessId = sessionStorage.getItem(schedulerKey);
+          if (!schedulerSessId) {
+            sessionStorage.setItem(schedulerKey, String(activeSess.session_id));
+          }
+        }
+      }
+    }
+
+    tick();
+    const id = setInterval(tick, 30_000);
+    return () => clearInterval(id);
+  }, [user]);
+
+  return (
+    <SchedulerContext.Provider value={null}>
+      {children}
+    </SchedulerContext.Provider>
+  );
+}
+
+export const useScheduler = () => useContext(SchedulerContext);
+
+---

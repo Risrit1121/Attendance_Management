@@ -1,0 +1,3440 @@
+backend/Dockerfile
+---
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Install dependencies first (layer cache)
+COPY package.json package-lock.json* ./
+RUN npm ci --omit=dev
+
+# Copy source
+COPY . .
+
+# Create backups directory
+RUN mkdir -p backups
+
+EXPOSE 4040
+
+CMD ["node", "server.js"]
+
+---
+backend/server.js
+---
+require('dotenv').config();
+const express    = require('express');
+const mongoose   = require('mongoose');
+const cors       = require('cors');
+const helmet     = require('helmet');
+const rateLimit  = require('express-rate-limit');
+
+const authRoutes          = require('./routes/auth');
+const courseRoutes        = require('./routes/courses');
+const sessionRoutes       = require('./routes/sessions');
+const attendanceRoutes    = require('./routes/attendance');
+const analyticsRoutes     = require('./routes/analytics');
+const adminRoutes         = require('./routes/admin');
+const microserviceRoutes  = require('./routes/microservices'); // BLE + QR proxy
+const qrRoutes            = require('./routes/qr');            // toy QR fallback (kept)
+const studentRoutes       = require('./routes/student');
+
+const { startAllJobs } = require('./jobs');
+
+const app = express();
+
+// ── Security ──────────────────────────────────────────────────────────────────
+app.use(helmet());
+app.use(cors({ origin: process.env.FRONTEND_URL || '*' }));
+app.use(express.json());
+
+const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20,
+  message: { error: 'Too many login attempts' } });
+app.use('/login', authLimiter);
+
+const limiter = rateLimit({ windowMs: 60 * 1000, max: 300,
+  standardHeaders: true, legacyHeaders: false });
+app.use(limiter);
+
+// ── Routes ────────────────────────────────────────────────────────────────────
+app.use('/',          authRoutes);
+app.use('/',          courseRoutes);
+app.use('/',          sessionRoutes);
+app.use('/',          attendanceRoutes);
+app.use('/analytics', analyticsRoutes);
+app.use('/admin',     adminRoutes);
+app.use('/',          microserviceRoutes); // /getMinor, /ble/validate, /getQR/:id, /qr/validate, /validate
+app.use('/',          qrRoutes);           // toy /decodeQR fallback
+app.use('/student',   studentRoutes);
+
+// ── Health ────────────────────────────────────────────────────────────────────
+app.get('/health', (_, res) => res.json({
+  status: 'ok', ts: new Date(),
+  services: {
+    ble: process.env.BLE_SERVICE_URL || 'http://localhost:8000',
+    qr:  process.env.QR_SERVICE_URL  || 'http://localhost:8000',
+  },
+}));
+
+// ── Error handler ─────────────────────────────────────────────────────────────
+app.use((err, req, res, next) => {
+  if (err.code === 11000) {
+    const field = Object.keys(err.keyValue || {})[0] || 'field';
+    return res.status(409).json({ error: `Duplicate value for ${field}` });
+  }
+  if (err.name === 'ValidationError') {
+    return res.status(400).json({ error: err.message });
+  }
+  console.error(err);
+  res.status(err.status || 500).json({ error: err.message || 'Internal server error' });
+});
+
+// ── DB + Boot ─────────────────────────────────────────────────────────────────
+mongoose
+  .connect(process.env.MONGO_URI || 'mongodb://localhost:27017/attendance', {
+    maxPoolSize: 50,
+    serverSelectionTimeoutMS: 5000,
+    socketTimeoutMS: 45000,
+  })
+  .then(() => {
+    console.log('MongoDB connected');
+    startAllJobs();
+    const PORT = process.env.PORT || 4040;
+    app.listen(PORT, () => console.log(`Server on :${PORT}`));
+  })
+  .catch(err => { console.error('DB error', err); process.exit(1); });
+
+---
+backend/middleware/auth.js
+---
+const jwt = require('jsonwebtoken');
+
+const SECRET = process.env.JWT_SECRET || 'changeme-secret';
+
+/**
+ * Attaches req.user from JWT.
+ */
+function authenticate(req, res, next) {
+  const header = req.headers.authorization;
+  if (!header || !header.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'No token provided' });
+  }
+  const token = header.slice(7);
+  try {
+    req.user = jwt.verify(token, SECRET);
+    next();
+  } catch {
+    return res.status(401).json({ error: 'Invalid or expired token' });
+  }
+}
+
+/**
+ * Factory: only allow specific roles.
+ * Usage: authorize('admin')  or  authorize('prof', 'admin')
+ */
+function authorize(...roles) {
+  return (req, res, next) => {
+    if (!req.user) return res.status(401).json({ error: 'Unauthenticated' });
+    if (!roles.includes(req.user.role)) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    next();
+  };
+}
+
+/**
+ * A professor or TA may only act on courses they teach / are TA for.
+ * Admins bypass this check.
+ *
+ * Sets req.course and req.isTa on the request for downstream use.
+ */
+async function ownsCourse(req, res, next) {
+  if (req.user.role === 'admin') return next();
+  const Course = require('../models/Course');
+  const courseId = req.params.courseId || req.body.course_id;
+  if (!courseId) return res.status(400).json({ error: 'course_id required' });
+
+  const course = await Course.findById(courseId).lean();
+  if (!course) return res.status(404).json({ error: 'Course not found' });
+
+  const uid     = req.user.user_id;
+  const isInstr = course.instructors.includes(uid);
+  const isTa    = Array.isArray(course.tas) && course.tas.includes(uid);
+
+  if (!isInstr && !isTa) {
+    return res.status(403).json({ error: 'You are not an instructor or TA for this course' });
+  }
+
+  req.course = course;
+  req.isTa   = isTa && !isInstr;
+  next();
+}
+
+/**
+ * Requires instructor role specifically (not just TA).
+ * Call after ownsCourse.
+ */
+function requireInstructor(req, res, next) {
+  if (req.user.role === 'admin') return next();
+  if (req.isTa) return res.status(403).json({ error: 'TAs cannot perform this action' });
+  next();
+}
+
+module.exports = { authenticate, authorize, ownsCourse, requireInstructor };
+
+---
+backend/routes/admin.js
+---
+const express    = require('express');
+const bcrypt     = require('bcryptjs');
+const multer     = require('multer');
+const csv        = require('csv-parse/sync');
+const Admin      = require('../models/Admin');
+const Professor  = require('../models/Professor');
+const Student    = require('../models/Student');
+const Course     = require('../models/Course');
+const Enrollment = require('../models/Enrollment');
+const Session    = require('../models/Session');
+const Attendance = require('../models/Attendance');
+const Classroom  = require('../models/Classroom');
+const Beacon     = require('../models/Beacon');
+const Bucket     = require('../models/Bucket');
+const { rebuildAllBuckets } = require('../services/bucketService');
+const { runBackup }         = require('../services/backupService');
+const { authenticate, authorize } = require('../middleware/auth');
+const { populateLectures }  = require('../utils/lecturePopulator');
+
+const router  = express.Router();
+const A       = [authenticate, authorize('admin')];
+const upload  = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+
+// ── GET /admin/stats ──────────────────────────────────────────────────────────
+// FIX: sessions = CURRENTLY ACTIVE sessions (not all-time total)
+router.get('/stats', ...A, async (req, res, next) => {
+  try {
+    const [students, professors, courses, activeSessions, totalSessions, enrollments, attendance] = await Promise.all([
+      Student.countDocuments(),
+      Professor.countDocuments(),
+      Course.countDocuments(),
+      Session.countDocuments({ active: true }),  // currently running
+      Session.countDocuments(),                   // all time
+      Enrollment.countDocuments({ status: 'Active' }),
+      Attendance.countDocuments(),
+    ]);
+    const avg_attendance = totalSessions > 0
+      ? parseFloat((attendance / totalSessions).toFixed(1))
+      : 0;
+    res.json({
+      students, professors, courses,
+      sessions:       activeSessions,  // what the "Active Sessions" card shows
+      totalSessions,
+      enrollments, attendance, avg_attendance,
+    });
+  } catch (err) { next(err); }
+});
+
+// ── GET /admin/users  (FIX: return consistent shape with role) ─────────────────
+// Previously had a bug where TA-check used $not: {$size:0} which fails if tas
+// field is missing. Use $exists + $not with size 0 correctly, or just fetch all.
+router.get('/users', ...A, async (req, res, next) => {
+  try {
+    const [admins, profs, students, taCourses] = await Promise.all([
+      Admin.find().select('-password').lean(),
+      Professor.find().select('-password').lean(),
+      Student.find().select('-password').lean(),
+      Course.find({ 'tas.0': { $exists: true } }).select('tas').lean(), // courses with ≥1 TA
+    ]);
+
+    const taSet = new Set(taCourses.flatMap(c => c.tas || []));
+
+    const all = [
+      ...admins.map(u => ({ ...u, id: u._id, name: u.name || u._id, role: 'admin' })),
+      ...profs.map(u => ({ ...u, id: u._id, role: 'prof' })),
+      ...students.map(u => ({ ...u, id: u._id, role: taSet.has(u._id) ? 'ta' : 'student' })),
+    ];
+    res.json(all);
+  } catch (err) { next(err); }
+});
+
+// ── GET /admin/courses  (FIX: return consistent shape with id field) ───────────
+router.get('/courses', ...A, async (req, res, next) => {
+  try {
+    const [courses, enrollAgg] = await Promise.all([
+      Course.find().lean(),
+      Enrollment.aggregate([
+        { $match: { status: 'Active' } },
+        { $group: { _id: '$course', count: { $sum: 1 } } },
+      ]),
+    ]);
+    const enrollMap = Object.fromEntries(enrollAgg.map(e => [String(e._id), e.count]));
+
+    // Return both _id and id so frontend works regardless of which field it reads
+    res.json(courses.map(c => ({
+      ...c,
+      id:       c._id,        // ← frontend reads c.id or c._id
+      enrolled: enrollMap[String(c._id)] || 0,
+    })));
+  } catch (err) { next(err); }
+});
+
+// ── Professor CRUD ────────────────────────────────────────────────────────────
+router.get('/professors', ...A, async (req, res, next) => {
+  try {
+    res.json((await Professor.find().select('-password').lean()).map(p => ({ ...p, id: p._id })));
+  } catch (err) { next(err); }
+});
+
+router.post('/professors', ...A, async (req, res, next) => {
+  try {
+    const { _id, name, email, password, department } = req.body;
+    if (!_id || !name || !email || !password) {
+      return res.status(400).json({ error: '_id, name, email, password required' });
+    }
+    const hashed = await bcrypt.hash(password, 10);
+    const prof   = await Professor.create({ _id, name, email, password: hashed, department });
+    const obj    = prof.toObject(); delete obj.password;
+    res.status(201).json({ ...obj, id: obj._id });
+  } catch (err) { next(err); }
+});
+
+router.delete('/professors/:id', ...A, async (req, res, next) => {
+  try {
+    await Professor.findByIdAndDelete(req.params.id);
+    res.json({ message: 'Professor deleted' });
+  } catch (err) { next(err); }
+});
+
+// ── Student CRUD ──────────────────────────────────────────────────────────────
+router.get('/students', ...A, async (req, res, next) => {
+  try {
+    res.json((await Student.find().select('-password').lean()).map(s => ({ ...s, id: s._id })));
+  } catch (err) { next(err); }
+});
+
+router.post('/students', ...A, async (req, res, next) => {
+  try {
+    const { _id, name, email, password, imageURL } = req.body;
+    if (!_id || !name || !email || !password) {
+      return res.status(400).json({ error: '_id, name, email, password required' });
+    }
+    const hashed  = await bcrypt.hash(password, 10);
+    const student = await Student.create({
+      _id, name, email, password: hashed,
+      imageURL: imageURL ||
+        `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(name)}`,
+    });
+    const obj = student.toObject(); delete obj.password;
+    res.status(201).json({ ...obj, id: obj._id });
+  } catch (err) { next(err); }
+});
+
+router.delete('/students/:id', ...A, async (req, res, next) => {
+  try {
+    await Student.findByIdAndDelete(req.params.id);
+    res.json({ message: 'Student deleted' });
+  } catch (err) { next(err); }
+});
+
+// ── TA management ─────────────────────────────────────────────────────────────
+router.post('/courses/:courseId/tas', ...A, async (req, res, next) => {
+  try {
+    const { student_id } = req.body;
+    if (!student_id) return res.status(400).json({ error: 'student_id required' });
+    const student = await Student.findById(student_id).lean();
+    if (!student) return res.status(404).json({ error: 'Student not found' });
+    const course = await Course.findByIdAndUpdate(
+      req.params.courseId,
+      { $addToSet: { tas: student_id } },
+      { new: true }
+    );
+    if (!course) return res.status(404).json({ error: 'Course not found' });
+    res.json({ message: 'TA added', tas: course.tas });
+  } catch (err) { next(err); }
+});
+
+router.delete('/courses/:courseId/tas/:studentId', ...A, async (req, res, next) => {
+  try {
+    const course = await Course.findByIdAndUpdate(
+      req.params.courseId,
+      { $pull: { tas: req.params.studentId } },
+      { new: true }
+    );
+    if (!course) return res.status(404).json({ error: 'Course not found' });
+    res.json({ message: 'TA removed', tas: course.tas });
+  } catch (err) { next(err); }
+});
+
+// ── Enrollment management ─────────────────────────────────────────────────────
+router.post('/enroll', ...A, async (req, res, next) => {
+  try {
+    const { student, course } = req.body;
+    if (!student || !course) return res.status(400).json({ error: 'student and course required' });
+    const enrollment = await Enrollment.findOneAndUpdate(
+      { student, course },
+      { $set: { status: 'Active', enrollmentDate: new Date() } },
+      { upsert: true, new: true }
+    );
+    res.status(201).json(enrollment);
+  } catch (err) { next(err); }
+});
+
+router.post('/enroll/bulk', ...A, async (req, res, next) => {
+  try {
+    const { course, student_ids } = req.body;
+    if (!course || !Array.isArray(student_ids)) {
+      return res.status(400).json({ error: 'course and student_ids[] required' });
+    }
+    const ops = student_ids.map(sid => ({
+      updateOne: {
+        filter: { student: sid, course },
+        update: { $set: { status: 'Active', enrollmentDate: new Date() } },
+        upsert: true,
+      },
+    }));
+    const result = await Enrollment.bulkWrite(ops);
+    res.json({ enrolled: result.upsertedCount + result.modifiedCount });
+  } catch (err) { next(err); }
+});
+
+router.post('/unenroll', ...A, async (req, res, next) => {
+  try {
+    const { student, course } = req.body;
+    await Enrollment.findOneAndUpdate({ student, course }, { $set: { status: 'Dropped' } });
+    res.json({ message: 'Unenrolled' });
+  } catch (err) { next(err); }
+});
+
+router.get('/enrollments/:courseId', ...A, async (req, res, next) => {
+  try {
+    const enrollments = await Enrollment.find({ course: req.params.courseId, status: 'Active' }).lean();
+    const students    = await Student.find({ _id: { $in: enrollments.map(e => e.student) } })
+      .select('-password').lean();
+    res.json(students.map(s => ({ ...s, id: s._id })));
+  } catch (err) { next(err); }
+});
+
+// ── GET /admin/student/:id/analytics (bucket-backed) ─────────────────────────
+router.get('/student/:studentId/analytics', ...A, async (req, res, next) => {
+  try {
+    const { studentId } = req.params;
+    const bucket = await Bucket.findOne({ studentUID: studentId }).lean();
+    const enrollments = await Enrollment.find({ student: studentId, status: 'Active' }).lean();
+    if (enrollments.length === 0) return res.json({ studentId, courses: [], cached: false });
+
+    const courseIds = enrollments.map(e => e.course);
+    const courses   = await Course.find({ _id: { $in: courseIds } }).lean();
+
+    if (bucket?.courses?.length > 0) {
+      const bucketMap = Object.fromEntries(bucket.courses.map(c => [c.courseUID, c]));
+      const courseStats = courses.map(c => {
+        const bc       = bucketMap[String(c._id)];
+        const attended = bc?.lectures?.length || 0;
+        const total    = c.lectures?.length || 0;
+        return {
+          courseId:      c._id,
+          courseName:    c.name,
+          slot:          c.slot,
+          totalLectures: total,
+          sessionsHeld:  attended,
+          attended,
+          attendancePct: total > 0 ? parseFloat(((attended / total) * 100).toFixed(1)) : 0,
+          fromCache:     true,
+        };
+      });
+      const student = await Student.findById(studentId).select('-password').lean();
+      return res.json({ studentId, student, courses: courseStats, cached: true });
+    }
+
+    // Live fallback
+    const sessions    = await Session.find({ course: { $in: courseIds } }).lean();
+    const sessionUIDs = sessions.map(s => s.sessionUID);
+    const records     = await Attendance.find({ sessionUID: { $in: sessionUIDs }, student: studentId }).lean();
+    const markedSet   = new Set(records.map(r => r.sessionUID));
+    const sessByCourse = {};
+    for (const s of sessions) {
+      if (!sessByCourse[String(s.course)]) sessByCourse[String(s.course)] = [];
+      sessByCourse[String(s.course)].push(s);
+    }
+    const courseStats = courses.map(c => {
+      const cs       = sessByCourse[String(c._id)] || [];
+      const attended = cs.filter(s => markedSet.has(s.sessionUID)).length;
+      return {
+        courseId: c._id, courseName: c.name, slot: c.slot,
+        totalLectures: c.lectures?.length || 0,
+        sessionsHeld: cs.length,
+        attended,
+        attendancePct: cs.length > 0 ? parseFloat(((attended / cs.length) * 100).toFixed(1)) : 0,
+        fromCache: false,
+      };
+    });
+    const student = await Student.findById(studentId).select('-password').lean();
+    res.json({ studentId, student, courses: courseStats, cached: false });
+  } catch (err) { next(err); }
+});
+
+// ── Classroom / Beacon management ─────────────────────────────────────────────
+router.get('/classrooms', authenticate, async (req, res, next) => {
+  try { res.json(await Classroom.find().lean()); } catch (err) { next(err); }
+});
+router.post('/classrooms', ...A, async (req, res, next) => {
+  try { res.status(201).json(await Classroom.create(req.body)); } catch (err) { next(err); }
+});
+router.get('/beacons', ...A, async (req, res, next) => {
+  try { res.json(await Beacon.find().lean()); } catch (err) { next(err); }
+});
+router.post('/beacons', ...A, async (req, res, next) => {
+  try { res.status(201).json(await Beacon.create(req.body)); } catch (err) { next(err); }
+});
+
+// ── CSV bulk operations ───────────────────────────────────────────────────────
+router.post('/csv/bulk-create', ...A, upload.single('file'), async (req, res, next) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+    const type = req.body.type;
+    const rows = csv.parse(req.file.buffer.toString(), { columns: true, skip_empty_lines: true });
+    let created = 0, skipped = 0;
+    const errors = [];
+    for (const row of rows) {
+      try {
+        if (type === 'students') {
+          const hashed = await bcrypt.hash(row.password || 'changeme', 10);
+          await Student.findOneAndUpdate({ _id: row._id },
+            { ...row, password: hashed, imageURL: row.imageURL || `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(row.name)}` },
+            { upsert: true });
+          created++;
+        } else if (type === 'professors') {
+          const hashed = await bcrypt.hash(row.password || 'changeme', 10);
+          await Professor.findOneAndUpdate({ _id: row._id }, { ...row, password: hashed }, { upsert: true });
+          created++;
+        } else if (type === 'courses') {
+          const instructors = row.instructors ? row.instructors.split(',').map(s=>s.trim()).filter(Boolean) : [];
+          const tas         = row.tas         ? row.tas.split(',').map(s=>s.trim()).filter(Boolean)         : [];
+          const data        = { ...row, instructors, tas };
+          const { lectures, schedules } = populateLectures(data);
+          await Course.findOneAndUpdate({ _id: row._id }, { ...data, lectures, schedules }, { upsert: true });
+          created++;
+        } else if (type === 'enrollments') {
+          await Enrollment.findOneAndUpdate(
+            { student: row.student, course: row.course },
+            { $set: { status: 'Active' } },
+            { upsert: true }
+          );
+          created++;
+        }
+      } catch (e) {
+        skipped++;
+        errors.push(`${row._id || JSON.stringify(row)}: ${e.message}`);
+      }
+    }
+    res.json({ created, skipped, errors: errors.slice(0, 10) });
+  } catch (err) { next(err); }
+});
+
+router.post('/csv/bulk-delete', ...A, upload.single('file'), async (req, res, next) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+    const type = req.body.type;
+    const rows = csv.parse(req.file.buffer.toString(), { columns: true, skip_empty_lines: true });
+    let deleted = 0;
+    const errors = [];
+    const ModelMap = { students: Student, professors: Professor, courses: Course };
+    for (const row of rows) {
+      try {
+        if (type === 'enrollments') {
+          await Enrollment.findOneAndUpdate({ student: row.student, course: row.course }, { $set: { status: 'Dropped' } });
+          deleted++;
+        } else if (ModelMap[type]) {
+          await ModelMap[type].findByIdAndDelete(row._id);
+          deleted++;
+        }
+      } catch (e) { errors.push(`${row._id}: ${e.message}`); }
+    }
+    res.json({ deleted, errors: errors.slice(0, 10) });
+  } catch (err) { next(err); }
+});
+
+// ── Manual maintenance ────────────────────────────────────────────────────────
+router.post('/rebuild-buckets', ...A, async (req, res, next) => {
+  try {
+    res.json({ message: 'Bucket rebuild started' });
+    rebuildAllBuckets().catch(console.error);
+  } catch (err) { next(err); }
+});
+router.post('/backup', ...A, async (req, res, next) => {
+  try {
+    res.json({ message: 'Backup started' });
+    runBackup().catch(console.error);
+  } catch (err) { next(err); }
+});
+
+module.exports = router;
+
+---
+backend/routes/analytics.js
+---
+/**
+ * analytics.js — lecture-based attendance analytics.
+ *
+ * KEY FIX: lectureStats is now built from course.lectures (the canonical list),
+ * not from the set of sessions. This means:
+ *  - A lecture with no sessions shows up with attended=0
+ *  - A lecture with sessions uses the intersection rule
+ *  - The heatmap/history for a student is derived from the intersection result
+ *
+ * The `hasSession` flag on each lecture stat tells the frontend whether
+ * any sessions have been held for that lecture.
+ */
+const express    = require('express');
+const Attendance = require('../models/Attendance');
+const Session    = require('../models/Session');
+const Course     = require('../models/Course');
+const Enrollment = require('../models/Enrollment');
+const Student    = require('../models/Student');
+const Professor  = require('../models/Professor');
+const { authenticate, authorize } = require('../middleware/auth');
+
+const router = express.Router();
+
+// ── Core intersection ─────────────────────────────────────────────────────────
+/**
+ * For each (courseId, lectureUID) pair among the sessions array, computes
+ * the SET of students who attended ALL sessions of that lecture.
+ *
+ * Returns Map< `${courseId}::${lectureUID}` , LectureEntry >
+ */
+function buildLectureAttendance(sessions, records) {
+  const lectureMap  = new Map();
+  for (const s of sessions) {
+    const key = `${s.course}::${s.lectureUID}`;
+    if (!lectureMap.has(key)) {
+      lectureMap.set(key, {
+        courseId:    String(s.course),
+        lectureUID:  s.lectureUID,
+        sessionUIDs: [],
+        presentInAll: null,
+      });
+    }
+    lectureMap.get(key).sessionUIDs.push(s.sessionUID);
+  }
+
+  const sessStudents = new Map();
+  for (const r of records) {
+    if (!sessStudents.has(r.sessionUID)) sessStudents.set(r.sessionUID, new Set());
+    sessStudents.get(r.sessionUID).add(String(r.student));
+  }
+
+  for (const lec of lectureMap.values()) {
+    if (!lec.sessionUIDs.length) { lec.presentInAll = new Set(); continue; }
+    const sorted = [...lec.sessionUIDs].sort(
+      (a, b) => (sessStudents.get(a)?.size || 0) - (sessStudents.get(b)?.size || 0)
+    );
+    let inter = new Set(sessStudents.get(sorted[0]) || []);
+    for (let i = 1; i < sorted.length && inter.size > 0; i++) {
+      const o = sessStudents.get(sorted[i]) || new Set();
+      for (const sid of inter) { if (!o.has(sid)) inter.delete(sid); }
+    }
+    lec.presentInAll = inter;
+  }
+  return lectureMap;
+}
+
+function canAccessCourse(course, userId, role) {
+  if (role === 'admin') return true;
+  if (course.instructors.map(String).includes(String(userId))) return true;
+  return Array.isArray(course.tas) && course.tas.map(String).includes(String(userId));
+}
+
+// ── GET /analytics/course/:courseId ──────────────────────────────────────────
+router.get('/course/:courseId', authenticate, async (req, res, next) => {
+  try {
+    const { courseId } = req.params;
+    const course = await Course.findById(courseId).lean();
+    if (!course) return res.status(404).json({ error: 'Course not found' });
+    if (!canAccessCourse(course, req.user.user_id, req.user.role)) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    const [sessions, enrolledCount] = await Promise.all([
+      Session.find({ course: courseId }).lean(),
+      Enrollment.countDocuments({ course: courseId, status: 'Active' }),
+    ]);
+
+    const records    = await Attendance.find({ sessionUID: { $in: sessions.map(s => s.sessionUID) } }).lean();
+    const lectureMap = buildLectureAttendance(sessions, records);
+
+    // Per-session detail lookup
+    const sessById = Object.fromEntries(sessions.map(s => [s.sessionUID, s]));
+
+    // Build lecture stats from course.lectures (canonical)
+    const lectureStats = course.lectures.map(l => {
+      const key       = `${courseId}::${l.lectureUID}`;
+      const lec       = lectureMap.get(key);
+      const sessionUIDs = lec?.sessionUIDs || [];
+      const attended    = lec?.presentInAll?.size || 0;
+
+      return {
+        lectureUID:    l.lectureUID,
+        scheduledTime: l.scheduledTime,
+        cancelled:     l.cancelled,
+        hasSession:    sessionUIDs.length > 0,
+        sessionCount:  sessionUIDs.length,
+        sessions: sessionUIDs.map(suid => ({
+          sessionUID:  suid,
+          method:      sessById[suid]?.method,
+          timestamp:   sessById[suid]?.timestamp,
+          markedCount: records.filter(r => r.sessionUID === suid).length,
+        })),
+        attended,
+        enrolled:      enrolledCount,
+        attendancePct: enrolledCount > 0
+          ? parseFloat(((attended / enrolledCount) * 100).toFixed(1))
+          : 0,
+      };
+    });
+
+    const lecturesHeld  = lectureStats.filter(l => l.hasSession && !l.cancelled);
+    const totalAttended = lectureStats.reduce((s, l) => s + l.attended, 0);
+    const totalPossible = lecturesHeld.length * enrolledCount;
+
+    res.json({
+      courseId,
+      courseName:    course.name,
+      totalLectures: course.lectures.length,
+      lecturesHeld:  lecturesHeld.length,
+      enrolled:      enrolledCount,
+      overallAttendancePct: totalPossible > 0
+        ? parseFloat(((totalAttended / totalPossible) * 100).toFixed(1))
+        : 0,
+      lectureStats,
+    });
+  } catch (err) { next(err); }
+});
+
+// ── GET /analytics/course/:courseId/students ──────────────────────────────────
+router.get('/course/:courseId/students', authenticate, async (req, res, next) => {
+  try {
+    const { courseId } = req.params;
+    const course = await Course.findById(courseId).lean();
+    if (!course) return res.status(404).json({ error: 'Course not found' });
+    if (!canAccessCourse(course, req.user.user_id, req.user.role)) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    const [sessions, enrollments] = await Promise.all([
+      Session.find({ course: courseId }).lean(),
+      Enrollment.find({ course: courseId, status: 'Active' }).lean(),
+    ]);
+
+    const studentIds  = enrollments.map(e => e.student);
+    const sessionUIDs = sessions.map(s => s.sessionUID);
+
+    const records = await Attendance.find({
+      sessionUID: { $in: sessionUIDs },
+      student:    { $in: studentIds },
+    }).lean();
+
+    const lectureMap = buildLectureAttendance(sessions, records);
+
+    // Number of lectures that have ≥1 session (lectures held)
+    const totalLectures = lectureMap.size;
+
+    const studentCount = {};
+    for (const lec of lectureMap.values()) {
+      for (const sid of lec.presentInAll) {
+        studentCount[sid] = (studentCount[sid] || 0) + 1;
+      }
+    }
+
+    const students = await Student.find({ _id: { $in: studentIds } }).select('-password').lean();
+
+    const studentStats = students.map(s => {
+      const attended = studentCount[String(s._id)] || 0;
+      return {
+        student_id:    s._id,
+        name:          s.name,
+        email:         s.email,
+        imageURL:      s.imageURL,
+        attended,
+        totalLectures,
+        attendancePct: totalLectures > 0
+          ? parseFloat(((attended / totalLectures) * 100).toFixed(1))
+          : 0,
+      };
+    }).sort((a, b) => b.attended - a.attended);
+
+    res.json({ courseId, totalLectures, enrolled: studentIds.length, studentStats });
+  } catch (err) { next(err); }
+});
+
+// ── GET /analytics/prof/:profId ───────────────────────────────────────────────
+router.get('/prof/:profId', authenticate, async (req, res, next) => {
+  try {
+    const { profId } = req.params;
+    if (req.user.role !== 'admin' && req.user.user_id !== profId) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    const courses = await Course.find({
+      $or: [{ instructors: profId }, { tas: profId }],
+    }).lean();
+
+    if (courses.length === 0) return res.json([]);
+
+    const courseIds = courses.map(c => c._id);
+    const [sessions, enrollAgg] = await Promise.all([
+      Session.find({ course: { $in: courseIds } }).lean(),
+      Enrollment.aggregate([
+        { $match: { course: { $in: courseIds }, status: 'Active' } },
+        { $group: { _id: '$course', count: { $sum: 1 } } },
+      ]),
+    ]);
+
+    const enrollMap  = Object.fromEntries(enrollAgg.map(e => [String(e._id), e.count]));
+    const records    = await Attendance.find({ sessionUID: { $in: sessions.map(s => s.sessionUID) } }).lean();
+    const lectureMap = buildLectureAttendance(sessions, records);
+
+    // Group by course
+    const lecsByCourse = {};
+    for (const [key, lec] of lectureMap.entries()) {
+      const cid = lec.courseId;
+      if (!lecsByCourse[cid]) lecsByCourse[cid] = [];
+      lecsByCourse[cid].push(lec);
+    }
+
+    const result = courses.map(c => {
+      const cid      = String(c._id);
+      const lecs     = lecsByCourse[cid] || [];
+      const enrolled = enrollMap[cid] || 0;
+      const totalAtt = lecs.reduce((s, l) => s + l.presentInAll.size, 0);
+      const possible = lecs.length * enrolled;
+
+      return {
+        course_id:   c._id,
+        course_name: c.name,
+        slot:        c.slot,
+        sessions:    sessions.filter(s => String(s.course) === cid).length,
+        lectures:    c.lectures.length,
+        lecturesHeld: lecs.length,
+        enrolled,
+        attendance:  totalAtt,
+        avg_pct:     possible > 0
+          ? parseFloat(((totalAtt / possible) * 100).toFixed(1))
+          : 0,
+      };
+    });
+
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
+// ── GET /analytics/at-risk/:profId ────────────────────────────────────────────
+router.get('/at-risk/:profId', authenticate, async (req, res, next) => {
+  try {
+    const { profId } = req.params;
+    if (req.user.role !== 'admin' && req.user.user_id !== profId) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    const courses = await Course.find({
+      $or: [{ instructors: profId }, { tas: profId }],
+    }).lean();
+
+    const courseIds = courses.map(c => c._id);
+    const courseMap = Object.fromEntries(courses.map(c => [String(c._id), c]));
+
+    const sessions    = await Session.find({ course: { $in: courseIds } }).lean();
+    const sessionUIDs = sessions.map(s => s.sessionUID);
+
+    const records    = await Attendance.find({ sessionUID: { $in: sessionUIDs } }).lean();
+    const lectureMap = buildLectureAttendance(sessions, records);
+
+    // Lectures held per course
+    const lecsByCourse = {};
+    for (const [, lec] of lectureMap.entries()) {
+      if (!lecsByCourse[lec.courseId]) lecsByCourse[lec.courseId] = [];
+      lecsByCourse[lec.courseId].push(lec);
+    }
+
+    // Student → course → lecturesAttended
+    const matrix = {};
+    for (const [, lec] of lectureMap.entries()) {
+      for (const sid of lec.presentInAll) {
+        if (!matrix[sid]) matrix[sid] = {};
+        matrix[sid][lec.courseId] = (matrix[sid][lec.courseId] || 0) + 1;
+      }
+    }
+
+    // Also include students with 0 attendance via enrollments
+    const enrollments = await Enrollment.find({ course: { $in: courseIds }, status: 'Active' }).lean();
+    for (const e of enrollments) {
+      const sid = String(e.student);
+      const cid = String(e.course);
+      if (!matrix[sid]) matrix[sid] = {};
+      if (matrix[sid][cid] === undefined) matrix[sid][cid] = 0;
+    }
+
+    const THRESHOLD = parseFloat(process.env.AT_RISK_THRESHOLD || '75');
+
+    const atRisk = [];
+    for (const [studentId, courseCounts] of Object.entries(matrix)) {
+      for (const [courseId, attended] of Object.entries(courseCounts)) {
+        const total = (lecsByCourse[courseId] || []).length;
+        if (!total) continue;
+        const pct = parseFloat(((attended / total) * 100).toFixed(1));
+        if (pct < THRESHOLD) {
+          atRisk.push({ student_id: studentId, course_id: courseId, attended, total, pct });
+        }
+      }
+    }
+
+    const studentIds = [...new Set(atRisk.map(r => r.student_id))];
+    const students   = await Student.find({ _id: { $in: studentIds } }).select('-password').lean();
+    const sMap       = Object.fromEntries(students.map(s => [String(s._id), s]));
+
+    res.json(atRisk.map(r => ({
+      ...r,
+      student_name: sMap[r.student_id]?.name || r.student_id,
+      email:        sMap[r.student_id]?.email,
+      course_name:  courseMap[r.course_id]?.name,
+    })).sort((a, b) => a.pct - b.pct));
+  } catch (err) { next(err); }
+});
+
+// ── GET /analytics/admin ──────────────────────────────────────────────────────
+router.get('/admin', authenticate, authorize('admin'), async (req, res, next) => {
+  try {
+    const [professors, courses, sessions, studentCount, enrollmentCount] = await Promise.all([
+      Professor.find().select('-password').lean(),
+      Course.find().lean(),
+      Session.find().lean(),
+      Student.countDocuments(),
+      Enrollment.countDocuments({ status: 'Active' }),
+    ]);
+
+    const records    = await Attendance.find({ sessionUID: { $in: sessions.map(s => s.sessionUID) } }).lean();
+    const lectureMap = buildLectureAttendance(sessions, records);
+
+    const enrollAgg = await Enrollment.aggregate([
+      { $match: { status: 'Active' } },
+      { $group: { _id: '$course', count: { $sum: 1 } } },
+    ]);
+    const enrollMap = Object.fromEntries(enrollAgg.map(e => [String(e._id), e.count]));
+
+    const lecsByCourse = {};
+    for (const [, lec] of lectureMap.entries()) {
+      if (!lecsByCourse[lec.courseId]) lecsByCourse[lec.courseId] = [];
+      lecsByCourse[lec.courseId].push(lec);
+    }
+
+    const profs = professors.map(p => ({
+      prof_id:   p._id,
+      prof_name: p.name,
+      courses: courses
+        .filter(c => c.instructors.map(String).includes(String(p._id)))
+        .map(c => {
+          const cid      = String(c._id);
+          const lecs     = lecsByCourse[cid] || [];
+          const enrolled = enrollMap[cid] || 0;
+          const totalAtt = lecs.reduce((s, l) => s + l.presentInAll.size, 0);
+          const possible = lecs.length * enrolled;
+          return {
+            course_id:    c._id,
+            name:         c.name,
+            sessions:     sessions.filter(s => String(s.course) === cid).length,
+            lectures:     c.lectures.length,
+            lecturesHeld: lecs.length,
+            enrolled,
+            avg_pct: possible > 0
+              ? parseFloat(((totalAtt / possible) * 100).toFixed(1))
+              : 0,
+          };
+        }),
+    }));
+
+    res.json({
+      totals: {
+        sessions:    sessions.length,
+        attendance:  records.length,
+        avg:         sessions.length > 0
+          ? parseFloat((records.length / sessions.length).toFixed(1))
+          : 0,
+        students:    studentCount,
+        courses:     courses.length,
+        profs:       professors.length,
+        enrollments: enrollmentCount,
+      },
+      profs,
+    });
+  } catch (err) { next(err); }
+});
+
+module.exports = router;
+
+---
+backend/routes/attendance.js
+---
+/**
+ * attendance.js
+ *
+ * FIX: students who marked in a session at 17:30 should NOT appear in an
+ * ongoing session now. The /attendance/:sessionId endpoint only returns
+ * records that belong to THAT specific session. The "present now" confusion
+ * arose because CourseView was polling attendance on the WRONG session ID
+ * (it was using the primary active session which happened to match a past
+ * session's lectureUID).  This is fully correct — each session has its own
+ * attendance records. No change needed here except ensuring we filter by
+ * the sessionUID, which we already do.
+ *
+ * ALSO: markAttendance now validates that the session is still active.
+ */
+const express    = require('express');
+const Attendance = require('../models/Attendance');
+const Session    = require('../models/Session');
+const Enrollment = require('../models/Enrollment');
+const Student    = require('../models/Student');
+const { updateBucketForStudent } = require('../services/bucketService');
+const { authenticate, authorize } = require('../middleware/auth');
+
+const router = express.Router();
+
+// ── Helper: validate session is active ───────────────────────────────────────
+async function requireActiveSession(sessionId) {
+  const session = await Session.findOne({ sessionUID: sessionId }).lean();
+  if (!session) throw Object.assign(new Error('Session not found'), { status: 404 });
+  const expiresAt = new Date(session.timestamp.getTime() + session.duration * 60000);
+  if (Date.now() > expiresAt) throw Object.assign(new Error('Session has ended'), { status: 410 });
+  return session;
+}
+
+// ── POST /markAttendance  (student or BLE device) ────────────────────────────
+router.post('/markAttendance', authenticate, async (req, res, next) => {
+  try {
+    const { session_id, student_id, method } = req.body;
+    if (!session_id || !student_id || !method) {
+      return res.status(400).json({ error: 'session_id, student_id, method required' });
+    }
+
+    // Students can only mark their own attendance
+    if (req.user.role === 'student' && req.user.user_id !== student_id) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    const session = await requireActiveSession(session_id);
+
+    // Verify student is enrolled
+    const enrolled = await Enrollment.findOne({
+      student: student_id,
+      course:  session.course,
+      status:  'Active',
+    }).lean();
+    if (!enrolled) return res.status(403).json({ error: 'Student not enrolled in this course' });
+
+    const rec = await Attendance.findOneAndUpdate(
+      { sessionUID: session_id, student: student_id },
+      { $setOnInsert: { sessionUID: session_id, student: student_id, verifiedVia: method, markedAt: new Date() } },
+      { upsert: true, new: true }
+    );
+
+    // Update bucket async — fire and forget
+    updateBucketForStudent(student_id).catch(console.error);
+
+    res.status(201).json({ message: 'Attendance marked', record: rec });
+  } catch (err) { next(err); }
+});
+
+// ── POST /manualAttendance  (prof/admin/ta for single student) ───────────────
+router.post('/manualAttendance', authenticate, authorize('prof','admin','ta'), async (req, res, next) => {
+  try {
+    const { session_id, student_id } = req.body;
+    if (!session_id || !student_id) return res.status(400).json({ error: 'session_id and student_id required' });
+
+    const session = await Session.findOne({ sessionUID: session_id }).lean();
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+
+    const rec = await Attendance.findOneAndUpdate(
+      { sessionUID: session_id, student: student_id },
+      { $set: { verifiedVia: 'Manual', markedAt: new Date() } },
+      { upsert: true, new: true }
+    );
+
+    updateBucketForStudent(student_id).catch(console.error);
+    res.json({ message: 'Manual attendance recorded', record: rec });
+  } catch (err) { next(err); }
+});
+
+// ── POST /manualAttendance/bulk ───────────────────────────────────────────────
+router.post('/manualAttendance/bulk', authenticate, authorize('prof','admin','ta'), async (req, res, next) => {
+  try {
+    const { session_id, student_ids } = req.body;
+    if (!session_id || !Array.isArray(student_ids)) {
+      return res.status(400).json({ error: 'session_id and student_ids[] required' });
+    }
+
+    const session = await Session.findOne({ sessionUID: session_id }).lean();
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+
+    const ops = student_ids.map(sid => ({
+      updateOne: {
+        filter: { sessionUID: session_id, student: sid },
+        update: { $set: { verifiedVia: 'Manual', markedAt: new Date() } },
+        upsert: true,
+      }
+    }));
+    const result = await Attendance.bulkWrite(ops);
+
+    for (const sid of student_ids) {
+      updateBucketForStudent(sid).catch(console.error);
+    }
+
+    res.json({ message: 'Bulk attendance recorded', upserted: result.upsertedCount, modified: result.modifiedCount });
+  } catch (err) { next(err); }
+});
+
+// ── GET /attendance/:sessionId ────────────────────────────────────────────────
+// Returns ONLY records for the specified session (not all sessions in a lecture).
+// This is intentionally session-scoped so the CourseView "Attendance Log"
+// shows who has checked into the current session, not all past attendees.
+router.get('/attendance/:sessionId', authenticate, async (req, res, next) => {
+  try {
+    const records = await Attendance.find({ sessionUID: req.params.sessionId }).lean();
+
+    const studentIds = [...new Set(records.map(r => r.student))];
+    const students   = await Student.find({ _id: { $in: studentIds } }).select('-password').lean();
+    const sMap       = Object.fromEntries(students.map(s => [String(s._id), s]));
+
+    res.json(records.map(r => ({
+      ...r,
+      student_id:   r.student,
+      studentName:  sMap[r.student]?.name,
+      studentEmail: sMap[r.student]?.email,
+    })));
+  } catch (err) { next(err); }
+});
+
+module.exports = router;
+
+---
+backend/routes/auth.js
+---
+const express   = require('express');
+const bcrypt    = require('bcryptjs');
+const jwt       = require('jsonwebtoken');
+const Admin     = require('../models/Admin');
+const Professor = require('../models/Professor');
+const Student   = require('../models/Student');
+const Course    = require('../models/Course');
+
+const router = express.Router();
+const SECRET = process.env.JWT_SECRET || 'changeme-secret';
+
+/**
+ * POST /login
+ * Body: { email, password }
+ *
+ * TAs are Students who are assigned as TAs on at least one course.
+ * They log in with student credentials but get role='ta' if they're a TA,
+ * which grants them the same course-level access as professors for those courses.
+ */
+router.post('/login', async (req, res, next) => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) {
+      return res.status(400).json({ error: 'email and password required' });
+    }
+
+    let user = null;
+    let role = null;
+
+    // 1. Admin
+    user = await Admin.findOne({ email }).lean();
+    if (user) role = 'admin';
+
+    // 2. Professor
+    if (!user) {
+      user = await Professor.findOne({ email }).lean();
+      if (user) role = 'prof';
+    }
+
+    // 3. Student (possibly a TA)
+    if (!user) {
+      const student = await Student.findOne({ email }).lean();
+      if (student) {
+        user = student;
+        // Check if this student is a TA on any course
+        const taCount = await Course.countDocuments({ tas: student._id });
+        role = taCount > 0 ? 'ta' : 'student';
+      }
+    }
+
+    if (!user) return res.status(401).json({ error: 'Invalid credentials' });
+
+    const ok = await bcrypt.compare(password, user.password);
+    if (!ok) return res.status(401).json({ error: 'Invalid credentials' });
+
+    const payload = { user_id: user._id, role, email: user.email };
+    const token   = jwt.sign(payload, SECRET, { expiresIn: '12h' });
+
+    res.json({
+      token,
+      user_id: user._id,
+      role,
+      name:    user.name || user._id,
+      email:   user.email,
+    });
+  } catch (err) { next(err); }
+});
+
+module.exports = router;
+
+---
+backend/routes/beacons.js
+---
+const express  = require('express');
+const Beacon   = require('../models/Beacon');
+const { authenticate, authorize } = require('../middleware/auth');
+
+const router = express.Router();
+
+// ── GET /getMinor?major=... ───────────────────────────────────────────────────
+// Returns the minor (classroom) associated with a BLE major ID
+router.get('/getMinor', authenticate, async (req, res, next) => {
+  try {
+    const { major } = req.query;
+    if (!major) return res.status(400).json({ error: 'major required' });
+
+    const beacon = await Beacon.findOne({ bleID: major }).lean();
+    if (!beacon) return res.status(404).json({ error: 'Beacon not found' });
+
+    res.json({ minor: beacon.classroom, beacon });
+  } catch (err) { next(err); }
+});
+
+// ── GET /validate?major=...&minor=... ─────────────────────────────────────────
+router.get('/validate', authenticate, async (req, res, next) => {
+  try {
+    const { major, minor } = req.query;
+    if (!major || !minor) return res.status(400).json({ error: 'major and minor required' });
+
+    const beacon = await Beacon.findOne({ bleID: major, classroom: minor }).lean();
+    res.json({ valid: !!beacon, beacon: beacon || null });
+  } catch (err) { next(err); }
+});
+
+// ── POST /admin/beacons  (admin) ──────────────────────────────────────────────
+router.post('/admin/beacons', authenticate, authorize('admin'), async (req, res, next) => {
+  try {
+    const beacon = await Beacon.create(req.body);
+    res.status(201).json(beacon);
+  } catch (err) { next(err); }
+});
+
+router.get('/admin/beacons', authenticate, authorize('admin'), async (req, res, next) => {
+  try {
+    res.json(await Beacon.find().lean());
+  } catch (err) { next(err); }
+});
+
+module.exports = router;
+
+---
+backend/routes/courses.js
+---
+/**
+ * courses.js — FIXES:
+ *
+ * 1. Schedule toggle: 'switch' is a reserved word in JS. Mongoose receives
+ *    it fine, but when you PATCH with { switch: true } from the frontend
+ *    Object.assign silently fails on reserved words in strict mode.
+ *    Solution: rename the field to `enabled` in the DB too (or alias it).
+ *    We keep `switch` in the schema (it works in Mongoose) but ensure
+ *    the PATCH handler explicitly uses $set with a string key to avoid
+ *    the reserved-word pitfall.
+ *
+ * 2. DELETE /courses/:id added.
+ *
+ * 3. TA management moved to admin routes but courses route still
+ *    exposes GET /courses/:courseId/tas for the course view.
+ */
+const express    = require('express');
+const Course     = require('../models/Course');
+const Enrollment = require('../models/Enrollment');
+const Student    = require('../models/Student');
+const { authenticate, authorize, ownsCourse, requireInstructor } = require('../middleware/auth');
+const { populateLectures } = require('../utils/lecturePopulator');
+
+const router = express.Router();
+
+// ── GET /courses/:profId ──────────────────────────────────────────────────────
+router.get('/courses/:profId', authenticate, async (req, res, next) => {
+  try {
+    const { profId } = req.params;
+    let query;
+
+    if (req.user.role === 'admin') {
+      query = profId === 'all' ? {} : { instructors: profId };
+    } else if (req.user.role === 'ta') {
+      if (req.user.user_id !== profId) return res.status(403).json({ error: 'Forbidden' });
+      query = { tas: profId };
+    } else {
+      if (req.user.user_id !== profId) return res.status(403).json({ error: 'Forbidden' });
+      query = { instructors: profId };
+    }
+
+    const courses = await Course.find(query).lean();
+    res.json(courses.map(c => ({ ...c, id: c._id })));
+  } catch (err) { next(err); }
+});
+
+// ── POST /courses  (admin only) ───────────────────────────────────────────────
+router.post('/courses', authenticate, authorize('admin'), async (req, res, next) => {
+  try {
+    const data = req.body;
+    const required = ['name', 'department', 'slot', 'venue', 'startDate', 'endDate'];
+    for (const f of required) {
+      if (!data[f]) return res.status(400).json({ error: `${f} is required` });
+    }
+    const { lectures, schedules } = populateLectures(data);
+    const course = new Course({
+      ...data,
+      lectures,
+      schedules: data.schedules?.length ? data.schedules : schedules,
+    });
+    await course.save();
+    res.status(201).json({ ...course.toObject(), id: course._id });
+  } catch (err) { next(err); }
+});
+
+// ── PUT /courses/:courseId  (admin only) ──────────────────────────────────────
+router.put('/courses/:courseId', authenticate, authorize('admin'), async (req, res, next) => {
+  try {
+    const allowed = ['name', 'department', 'venue', 'instructors', 'tas'];
+    const update  = {};
+    for (const k of allowed) {
+      if (req.body[k] !== undefined) update[k] = req.body[k];
+    }
+    const course = await Course.findByIdAndUpdate(req.params.courseId, { $set: update }, { new: true });
+    if (!course) return res.status(404).json({ error: 'Course not found' });
+    res.json({ ...course.toObject(), id: course._id });
+  } catch (err) { next(err); }
+});
+
+// ── DELETE /courses/:courseId  (admin only) ───────────────────────────────────
+router.delete('/courses/:courseId', authenticate, authorize('admin'), async (req, res, next) => {
+  try {
+    await Course.findByIdAndDelete(req.params.courseId);
+    res.json({ message: 'Course deleted' });
+  } catch (err) { next(err); }
+});
+
+// ── GET /course/:courseId/students ────────────────────────────────────────────
+router.get('/course/:courseId/students', authenticate, async (req, res, next) => {
+  try {
+    const enrollments = await Enrollment.find({ course: req.params.courseId, status: 'Active' }).lean();
+    const students    = await Student.find({ _id: { $in: enrollments.map(e => e.student) } })
+      .select('-password').lean();
+    res.json(students.map(s => ({ ...s, id: s._id })));
+  } catch (err) { next(err); }
+});
+
+// ── GET /courses/:courseId/schedules ──────────────────────────────────────────
+router.get('/courses/:courseId/schedules', authenticate, async (req, res, next) => {
+  try {
+    const course = await Course.findById(req.params.courseId).select('schedules').lean();
+    if (!course) return res.status(404).json({ error: 'Course not found' });
+    res.json(course.schedules || []);
+  } catch (err) { next(err); }
+});
+
+// ── POST /courses/:courseId/schedule  (add one entry) ─────────────────────────
+router.post('/courses/:courseId/schedule',
+  authenticate, ownsCourse, requireInstructor,
+  async (req, res, next) => {
+    try {
+      const { scheduledDay, startTime, endTime, method } = req.body;
+      const VALID_DAYS    = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
+      const VALID_METHODS = ['BLE','QRCode','Manual'];
+      if (!VALID_DAYS.includes(scheduledDay))  return res.status(400).json({ error: 'Invalid day' });
+      if (!VALID_METHODS.includes(method))     return res.status(400).json({ error: 'Invalid method' });
+      if (!/^\d{2}:\d{2}$/.test(startTime))   return res.status(400).json({ error: 'startTime must be HH:MM' });
+      if (!/^\d{2}:\d{2}$/.test(endTime))     return res.status(400).json({ error: 'endTime must be HH:MM' });
+
+      const newEntry = { scheduledDay, startTime, endTime, method, switch: false };
+      const course = await Course.findByIdAndUpdate(
+        req.params.courseId,
+        { $push: { schedules: newEntry } },
+        { new: true }
+      );
+      if (!course) return res.status(404).json({ error: 'Course not found' });
+      const added = course.schedules[course.schedules.length - 1];
+      res.status(201).json({ message: 'Schedule added', schedule: added, schedules: course.schedules });
+    } catch (err) { next(err); }
+  }
+);
+
+// ── PATCH /courses/:courseId/schedule/:index ──────────────────────────────────
+// FIX: 'switch' is a reserved word. Use string-keyed $set to avoid JS pitfall.
+router.patch('/courses/:courseId/schedule/:index',
+  authenticate, ownsCourse, requireInstructor,
+  async (req, res, next) => {
+    try {
+      const idx  = parseInt(req.params.index, 10);
+      const body = req.body; // may contain: scheduledDay, startTime, endTime, method, switch
+
+      // Build $set using string keys to avoid reserved-word issues
+      const setObj = {};
+      for (const [k, v] of Object.entries(body)) {
+        setObj[`schedules.${idx}.${k}`] = v;
+      }
+
+      const course = await Course.findByIdAndUpdate(
+        req.params.courseId,
+        { $set: setObj },
+        { new: true }
+      );
+      if (!course) return res.status(404).json({ error: 'Course not found' });
+      if (!course.schedules[idx]) return res.status(404).json({ error: 'Schedule index not found' });
+
+      res.json({ message: 'Schedule updated', schedule: course.schedules[idx] });
+    } catch (err) { next(err); }
+  }
+);
+
+// ── DELETE /courses/:courseId/schedule/:index ─────────────────────────────────
+router.delete('/courses/:courseId/schedule/:index',
+  authenticate, ownsCourse, requireInstructor,
+  async (req, res, next) => {
+    try {
+      const idx    = parseInt(req.params.index, 10);
+      const course = await Course.findById(req.params.courseId);
+      if (!course) return res.status(404).json({ error: 'Course not found' });
+      if (!course.schedules[idx]) return res.status(404).json({ error: 'Schedule index not found' });
+      course.schedules.splice(idx, 1);
+      course.markModified('schedules');
+      await course.save();
+      res.json({ message: 'Schedule deleted', schedules: course.schedules });
+    } catch (err) { next(err); }
+  }
+);
+
+// ── PUT /courses/:courseId/schedule  (full replace) ───────────────────────────
+router.put('/courses/:courseId/schedule',
+  authenticate, ownsCourse, requireInstructor,
+  async (req, res, next) => {
+    try {
+      const { schedules } = req.body;
+      if (!Array.isArray(schedules)) return res.status(400).json({ error: 'schedules must be array' });
+      const course = await Course.findByIdAndUpdate(
+        req.params.courseId,
+        { $set: { schedules } },
+        { new: true }
+      );
+      if (!course) return res.status(404).json({ error: 'Course not found' });
+      res.json({ message: 'Schedules updated', schedules: course.schedules });
+    } catch (err) { next(err); }
+  }
+);
+
+// ── PATCH /courses/:courseId/lectures/:lectureUID/cancel ──────────────────────
+router.patch('/courses/:courseId/lectures/:lectureUID/cancel',
+  authenticate, ownsCourse,
+  async (req, res, next) => {
+    try {
+      const result = await Course.updateOne(
+        { _id: req.params.courseId, 'lectures.lectureUID': req.params.lectureUID },
+        { $set: { 'lectures.$.cancelled': true } }
+      );
+      if (result.matchedCount === 0) return res.status(404).json({ error: 'Lecture not found' });
+      res.json({ message: 'Lecture cancelled' });
+    } catch (err) { next(err); }
+  }
+);
+
+module.exports = router;
+
+---
+backend/routes/microservices.js
+---
+/**
+ * microservices.js
+ *
+ * Proxies calls to the external BLE and QR microservices.
+ * Base URL configured via env vars:
+ *   BLE_SERVICE_URL  = http://localhost:8000  (default)
+ *   QR_SERVICE_URL   = http://localhost:8000  (same service, different prefix)
+ *
+ * BLE microservice API (from the spec):
+ *   POST /ble/generate-minor  { major_id }  → { minor, expires_in }
+ *   POST /ble/validate        { class_id, beacons: [{major,minor,rssi}] } → { valid }
+ *
+ * QR microservice API (from the spec):
+ *   POST /qr/generate  { class_id }                → { hash, expires_in }
+ *   POST /qr/validate  { class_id, hash, timestamp } → { valid }
+ *
+ * Our backend exposes:
+ *   GET  /getMinor?major=...          → calls POST /ble/generate-minor
+ *   POST /ble/validate                → proxies POST /ble/validate (adds course lookup)
+ *   GET  /getQR/:sessionId            → calls POST /qr/generate
+ *   POST /qr/validate                 → proxies POST /qr/validate
+ *   POST /markAttendance (existing)   → unchanged, called after validation succeeds
+ *
+ * The BLE validate flow:
+ *   Student app → POST /ble/validate (our backend) → microservice → if valid → mark attendance
+ *
+ * The QR flow:
+ *   Prof screen → GET /getQR/:sessionId → microservice → display hash as QR
+ *   Student app → POST /qr/validate    → microservice → if valid → mark attendance
+ */
+
+const express    = require('express');
+const axios      = require('axios');
+const Session    = require('../models/Session');
+const Attendance = require('../models/Attendance');
+const Enrollment = require('../models/Enrollment');
+const Beacon     = require('../models/Beacon');
+const { updateBucketForStudent } = require('../services/bucketService');
+const { authenticate } = require('../middleware/auth');
+
+const router = express.Router();
+
+const BLE_URL = process.env.BLE_SERVICE_URL || 'http://localhost:8000';
+const QR_URL  = process.env.QR_SERVICE_URL  || 'http://localhost:8000';
+
+// ── Helper: call microservice with timeout ─────────────────────────────────────
+async function msPost(baseUrl, path, body) {
+  const res = await axios.post(`${baseUrl}${path}`, body, {
+    timeout: 5000,
+    headers: { 'Content-Type': 'application/json' },
+  });
+  return res.data;
+}
+
+// ── GET /getMinor?major=...  (ESP32 → our backend → BLE microservice) ─────────
+// The ESP32 calls this to get its rotating minor value.
+router.get('/getMinor', authenticate, async (req, res, next) => {
+  try {
+    const { major } = req.query;
+    if (!major) return res.status(400).json({ error: 'major required' });
+
+    const data = await msPost(BLE_URL, '/ble/generate-minor', { major_id: major });
+    // data = { minor, expires_in }
+    res.json({ minor: data.minor, expiresIn: data.expires_in, major });
+  } catch (err) {
+    if (err.code === 'ECONNREFUSED' || err.code === 'ETIMEDOUT') {
+      return res.status(503).json({ error: 'BLE microservice unavailable' });
+    }
+    next(err);
+  }
+});
+
+// ── POST /ble/validate  (student app → our backend → BLE microservice) ────────
+// Body: { session_id, beacons: [{major, minor, rssi}] }
+// Picks the strongest beacon (highest RSSI), validates with microservice,
+// and if valid marks attendance for the student.
+router.post('/ble/validate', authenticate, async (req, res, next) => {
+  try {
+    const { session_id, beacons } = req.body;
+    if (!session_id || !Array.isArray(beacons) || beacons.length === 0) {
+      return res.status(400).json({ error: 'session_id and beacons[] required' });
+    }
+
+    const session = await Session.findOne({ sessionUID: session_id, active: true }).lean();
+    if (!session) return res.status(404).json({ error: 'No active session found' });
+    if (session.method !== 'BLE') {
+      return res.status(400).json({ error: 'Session is not BLE mode' });
+    }
+
+    const studentId = req.user.user_id;
+
+    // Verify enrollment
+    const enrolled = await Enrollment.findOne({
+      student: studentId,
+      course:  session.course,
+      status:  'Active',
+    }).lean();
+    if (!enrolled) return res.status(403).json({ error: 'Not enrolled in this course' });
+
+    // Look up classroom from beacon to get class_id for the microservice
+    const bestBeacon = [...beacons].sort((a, b) => b.rssi - a.rssi)[0];
+    const beaconDoc  = await Beacon.findOne({ bleID: bestBeacon.major }).lean();
+    const classId    = beaconDoc?.classroom || session.course;
+
+    // Call BLE microservice — send ALL beacons as per spec
+    let msResult;
+    try {
+      msResult = await msPost(BLE_URL, '/ble/validate', {
+        class_id: classId,
+        beacons,
+      });
+    } catch (e) {
+      // If microservice is down, fall back to basic beacon lookup
+      const beaconValid = await Beacon.findOne({
+        bleID:     bestBeacon.major,
+        classroom: { $exists: true },
+      }).lean();
+      msResult = { valid: !!beaconValid };
+    }
+
+    if (!msResult.valid) {
+      return res.status(400).json({ valid: false, error: 'Beacon validation failed' });
+    }
+
+    // Mark attendance
+    await Attendance.findOneAndUpdate(
+      { sessionUID: session_id, student: studentId },
+      { $setOnInsert: { sessionUID: session_id, student: studentId, verifiedVia: 'BLE', markedAt: new Date() } },
+      { upsert: true, new: true }
+    );
+
+    updateBucketForStudent(studentId).catch(console.error);
+    res.json({ valid: true, message: 'Attendance marked via BLE' });
+  } catch (err) { next(err); }
+});
+
+// ── GET /getQR/:sessionId  (prof screen → our backend → QR microservice) ──────
+// Returns a hash that the frontend renders as a QR code.
+// Refreshes every 5 seconds (frontend polls).
+router.get('/getQR/:sessionId', authenticate, async (req, res, next) => {
+  try {
+    const session = await Session.findOne({ sessionUID: req.params.sessionId }).lean();
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+
+    let hash, expiresIn;
+    try {
+      const data = await msPost(QR_URL, '/qr/generate', { class_id: session.course });
+      hash      = data.hash;
+      expiresIn = data.expires_in * 1000; // convert to ms
+    } catch (e) {
+      // Toy fallback (microservice down)
+      const crypto = require('crypto');
+      const window  = Math.floor(Date.now() / 5000);
+      hash      = crypto.createHmac('sha256', process.env.QR_SECRET || 'qr-secret')
+        .update(`${session.sessionUID}:${window}`).digest('hex').slice(0, 8);
+      expiresIn = 5000 - (Date.now() % 5000);
+    }
+
+    res.json({ qr: hash, expiresIn, sessionId: req.params.sessionId });
+  } catch (err) { next(err); }
+});
+
+// ── POST /qr/validate  (student app → our backend → QR microservice) ──────────
+// Body: { session_id, hash }
+// Validates with microservice and marks attendance if valid.
+router.post('/qr/validate', authenticate, async (req, res, next) => {
+  try {
+    const { session_id, hash } = req.body;
+    if (!session_id || !hash) {
+      return res.status(400).json({ error: 'session_id and hash required' });
+    }
+
+    const session = await Session.findOne({ sessionUID: session_id, active: true }).lean();
+    if (!session) return res.status(404).json({ error: 'No active session found' });
+    if (session.method !== 'QRCode') {
+      return res.status(400).json({ error: 'Session is not QR mode' });
+    }
+
+    const studentId = req.user.user_id;
+    const enrolled  = await Enrollment.findOne({
+      student: studentId, course: session.course, status: 'Active',
+    }).lean();
+    if (!enrolled) return res.status(403).json({ error: 'Not enrolled in this course' });
+
+    // Validate with QR microservice — timestamp is NOW (per spec: Date.now() at scan)
+    let msResult;
+    try {
+      msResult = await msPost(QR_URL, '/qr/validate', {
+        class_id:  session.course,
+        hash,
+        timestamp: Date.now(),
+      });
+    } catch (e) {
+      // Toy fallback
+      const crypto = require('crypto');
+      const window  = Math.floor(Date.now() / 5000);
+      const expected = crypto.createHmac('sha256', process.env.QR_SECRET || 'qr-secret')
+        .update(`${session_id}:${window}`).digest('hex').slice(0, 8);
+      const prevWindow = Math.floor((Date.now() - 5000) / 5000);
+      const prevExpected = crypto.createHmac('sha256', process.env.QR_SECRET || 'qr-secret')
+        .update(`${session_id}:${prevWindow}`).digest('hex').slice(0, 8);
+      msResult = { valid: hash === expected || hash === prevExpected };
+    }
+
+    if (!msResult.valid) {
+      return res.status(400).json({ valid: false, error: 'QR code invalid or expired' });
+    }
+
+    await Attendance.findOneAndUpdate(
+      { sessionUID: session_id, student: studentId },
+      { $setOnInsert: { sessionUID: session_id, student: studentId, verifiedVia: 'QRCode', markedAt: new Date() } },
+      { upsert: true, new: true }
+    );
+
+    updateBucketForStudent(studentId).catch(console.error);
+    res.json({ valid: true, message: 'Attendance marked via QR' });
+  } catch (err) { next(err); }
+});
+
+// ── GET /validate?major=...&minor=... (legacy beacon check) ───────────────────
+router.get('/validate', authenticate, async (req, res, next) => {
+  try {
+    const { major, minor } = req.query;
+    if (!major || !minor) return res.status(400).json({ error: 'major and minor required' });
+    const beacon = await Beacon.findOne({ bleID: major }).lean();
+    res.json({ valid: !!beacon, beacon: beacon || null });
+  } catch (err) { next(err); }
+});
+
+module.exports = router;
+
+---
+backend/routes/qr.js
+---
+/**
+ * QR Microservice — Toy Implementation
+ *
+ * Real system would be a separate service. Here we simulate:
+ *  - A HMAC-signed token that rotates every 5 seconds (window = Math.floor(ts/5000))
+ *  - GET /getQR/:sessionId   → returns the current token (frontend renders as QR)
+ *  - GET /decodeQR?qr=...    → validates a scanned token and returns session info
+ *
+ * The token format: base64( JSON({ sessionId, window, sig: HMAC(sessionId+window) }) )
+ */
+
+const express = require('express');
+const crypto  = require('crypto');
+const Session = require('../models/Session');
+const { authenticate } = require('../middleware/auth');
+
+const router = express.Router();
+const QR_SECRET = process.env.QR_SECRET || 'qr-toy-secret';
+
+function currentWindow() {
+  return Math.floor(Date.now() / 5000);
+}
+
+function makeToken(sessionId, window) {
+  const payload = `${sessionId}:${window}`;
+  const sig     = crypto.createHmac('sha256', QR_SECRET).update(payload).digest('hex').slice(0, 16);
+  return Buffer.from(JSON.stringify({ sessionId, window, sig })).toString('base64url');
+}
+
+function verifyToken(token) {
+  try {
+    const { sessionId, window: w, sig } = JSON.parse(Buffer.from(token, 'base64url').toString());
+    const now = currentWindow();
+    // Accept current window or the one just before (grace for 5-sec boundary)
+    if (Math.abs(now - w) > 1) return null;
+    const expected = crypto.createHmac('sha256', QR_SECRET)
+      .update(`${sessionId}:${w}`).digest('hex').slice(0, 16);
+    if (sig !== expected) return null;
+    return sessionId;
+  } catch {
+    return null;
+  }
+}
+
+// ── GET /getQR/:sessionId ─────────────────────────────────────────────────────
+router.get('/getQR/:sessionId', authenticate, async (req, res, next) => {
+  try {
+    const { sessionId } = req.params;
+    const session = await Session.findOne({ sessionUID: sessionId }).lean();
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+
+    const token   = makeToken(sessionId, currentWindow());
+    const expiresIn = 5000 - (Date.now() % 5000); // ms until next rotation
+
+    res.json({
+      qr:        token,
+      expiresIn, // frontend uses this to know when to refresh
+      sessionId,
+    });
+  } catch (err) { next(err); }
+});
+
+// ── GET /decodeQR?qr=... ──────────────────────────────────────────────────────
+router.get('/decodeQR', authenticate, async (req, res, next) => {
+  try {
+    const { qr } = req.query;
+    if (!qr) return res.status(400).json({ error: 'qr parameter required' });
+
+    const sessionId = verifyToken(qr);
+    if (!sessionId) return res.status(400).json({ error: 'Invalid or expired QR code' });
+
+    const session = await Session.findOne({ sessionUID: sessionId }).lean();
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+
+    // Check session is still active
+    const expiresAt = new Date(session.timestamp.getTime() + session.duration * 60000);
+    if (Date.now() > expiresAt) return res.status(410).json({ error: 'Session has ended' });
+
+    res.json({ valid: true, sessionId, courseId: session.course, method: 'QRCode' });
+  } catch (err) { next(err); }
+});
+
+module.exports = router;
+
+---
+backend/routes/sessions.js
+---
+/**
+ * sessions.js — FIXES:
+ *
+ * 1. Ad-hoc lecture creation: when a session is started at an "odd hour"
+ *    (no matching scheduled lecture within ±30 min), a new lecture entry
+ *    is appended to Course.lectures with scheduledTime = now and a sensible
+ *    duration window. The session is then linked to that lectureUID.
+ *    This way analytics always has a proper lecture to group sessions under.
+ *
+ * 2. Active session uses active:true flag (from previous fix).
+ *
+ * 3. Lecture matching window: ±30 minutes around now to catch slightly
+ *    late/early session starts without creating spurious lectures.
+ */
+const express  = require('express');
+const { v4: uuidv4 } = require('uuid');
+const Session  = require('../models/Session');
+const Course   = require('../models/Course');
+const { authenticate } = require('../middleware/auth');
+
+const router = express.Router();
+
+const LECTURE_MATCH_WINDOW_MS = 30 * 60 * 1000; // ±30 min
+const DEFAULT_LECTURE_DURATION_MIN = 55;          // typical class length
+
+// ── Resolve or create a lecture for an ad-hoc session ─────────────────────────
+/**
+ * Finds the best matching lecture in course.lectures for the current time.
+ * If none found within ±30 min, creates a new one on the Course document.
+ *
+ * Returns { lectureUID, scheduledTime, wasCreated }
+ */
+async function resolveOrCreateLecture(course, providedLectureUID) {
+  const now = new Date();
+
+  // 1. If caller explicitly provided a lectureUID, use it
+  if (providedLectureUID) {
+    const lec = course.lectures.find(l => l.lectureUID === providedLectureUID);
+    if (lec) return { lectureUID: lec.lectureUID, scheduledTime: lec.scheduledTime, wasCreated: false };
+    // Provided UID not found — fall through to auto-resolve
+  }
+
+  // 2. Find the closest non-cancelled lecture within the window
+  const window = LECTURE_MATCH_WINDOW_MS;
+  const closest = course.lectures
+    .filter(l => !l.cancelled)
+    .map(l => ({ ...l, diff: Math.abs(new Date(l.scheduledTime) - now) }))
+    .filter(l => l.diff <= window)
+    .sort((a, b) => a.diff - b.diff)[0];
+
+  if (closest) {
+    return { lectureUID: closest.lectureUID, scheduledTime: closest.scheduledTime, wasCreated: false };
+  }
+
+  // 3. No match — create an ad-hoc lecture on the Course document
+  // Round scheduledTime down to the nearest minute for cleanliness
+  const scheduledTime = new Date(Math.floor(now.getTime() / 60000) * 60000);
+  const lectureUID    = uuidv4();
+
+  await Course.updateOne(
+    { _id: course._id },
+    {
+      $push: {
+        lectures: {
+          lectureUID,
+          scheduledTime,
+          cancelled: false,
+        },
+      },
+    }
+  );
+
+  console.log(`[Session] Created ad-hoc lecture ${lectureUID} for course ${course._id} at ${scheduledTime.toISOString()}`);
+  return { lectureUID, scheduledTime, wasCreated: true };
+}
+
+// ── POST /startSession ────────────────────────────────────────────────────────
+router.post('/startSession', authenticate, async (req, res, next) => {
+  try {
+    const { course_id, mode, lectureUID } = req.body;
+    if (!course_id || !mode) {
+      return res.status(400).json({ error: 'course_id and mode are required' });
+    }
+
+    const course = await Course.findById(course_id).lean();
+    if (!course) return res.status(404).json({ error: 'Course not found' });
+
+    const uid     = req.user.user_id;
+    const allowed = req.user.role === 'admin'
+      || course.instructors.includes(uid)
+      || (course.tas || []).includes(uid);
+    if (!allowed) return res.status(403).json({ error: 'Forbidden' });
+
+    // Resolve (or create) the lecture this session belongs to
+    const { lectureUID: resolvedUID, scheduledTime, wasCreated } =
+      await resolveOrCreateLecture(course, lectureUID);
+
+    // Guard: no duplicate active session for same (course, lectureUID, method)
+    const existing = await Session.findOne({
+      course:     course_id,
+      lectureUID: resolvedUID,
+      method:     mode,
+      active:     true,
+    }).lean();
+
+    if (existing) {
+      return res.status(409).json({
+        error:      `An active ${mode} session already exists for this lecture`,
+        session_id: existing.sessionUID,
+      });
+    }
+
+    const session = await Session.create({
+      course:          course_id,
+      lectureUID:      resolvedUID,
+      scheduledTime,
+      duration:        DEFAULT_LECTURE_DURATION_MIN,
+      method:          mode,
+      isAutoGenerated: false,
+      active:          true,
+    });
+
+    res.status(201).json({
+      session_id:   session.sessionUID,
+      lectureUID:   resolvedUID,
+      method:       mode,
+      lectureCreated: wasCreated, // tells the frontend if a new lecture was made
+    });
+  } catch (err) { next(err); }
+});
+
+// ── POST /endSession/:sessionId ───────────────────────────────────────────────
+router.post('/endSession/:sessionId', authenticate, async (req, res, next) => {
+  try {
+    const session = await Session.findOneAndUpdate(
+      { sessionUID: req.params.sessionId },
+      { $set: { active: false, endedAt: new Date() } },
+      { new: true }
+    );
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+    res.json({ message: 'Session ended', session_id: session.sessionUID });
+  } catch (err) { next(err); }
+});
+
+// ── GET /activeSession?course_id=... ─────────────────────────────────────────
+router.get('/activeSession', authenticate, async (req, res, next) => {
+  try {
+    const { course_id } = req.query;
+    if (!course_id) return res.status(400).json({ error: 'course_id required' });
+
+    const sessions = await Session.find({ course: course_id, active: true })
+      .sort({ timestamp: -1 })
+      .lean();
+
+    if (sessions.length === 0) return res.json({});
+
+    const primary = sessions[0];
+    res.json({
+      session_id:     primary.sessionUID,
+      method:         primary.method,
+      lectureUID:     primary.lectureUID,
+      startedAt:      primary.timestamp,
+      activeSessions: sessions.map(s => ({
+        session_id: s.sessionUID,
+        method:     s.method,
+        lectureUID: s.lectureUID,
+        startedAt:  s.timestamp,
+      })),
+    });
+  } catch (err) { next(err); }
+});
+
+// ── GET /admin/sessions ───────────────────────────────────────────────────────
+router.get('/admin/sessions', authenticate, async (req, res, next) => {
+  try {
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
+    const sessions = await Session.find().sort({ timestamp: -1 }).limit(200).lean();
+    res.json(sessions.map(s => ({
+      ...s,
+      session_id: s.sessionUID,
+      course_id:  s.course,
+    })));
+  } catch (err) { next(err); }
+});
+
+module.exports = router;
+
+---
+backend/routes/student.js
+---
+const express    = require('express');
+const Attendance = require('../models/Attendance');
+const Session    = require('../models/Session');
+const Enrollment = require('../models/Enrollment');
+const Student    = require('../models/Student');
+const Bucket     = require('../models/Bucket');
+const { authenticate } = require('../middleware/auth');
+
+const router = express.Router();
+
+// ── Shared intersection helper (same logic as analytics) ─────────────────────
+function buildLectureAttendance(sessions, records) {
+  const lectureMap = new Map();
+  for (const s of sessions) {
+    const key = `${s.course}::${s.lectureUID}`;
+    if (!lectureMap.has(key)) {
+      lectureMap.set(key, { lectureUID: s.lectureUID, sessionUIDs: [], presentInAll: null });
+    }
+    lectureMap.get(key).sessionUIDs.push(s.sessionUID);
+  }
+
+  const sessStudents = new Map();
+  for (const r of records) {
+    if (!sessStudents.has(r.sessionUID)) sessStudents.set(r.sessionUID, new Set());
+    sessStudents.get(r.sessionUID).add(r.student);
+  }
+
+  for (const lec of lectureMap.values()) {
+    if (!lec.sessionUIDs.length) { lec.presentInAll = new Set(); continue; }
+    const sorted = [...lec.sessionUIDs].sort(
+      (a, b) => (sessStudents.get(a)?.size || 0) - (sessStudents.get(b)?.size || 0)
+    );
+    let inter = new Set(sessStudents.get(sorted[0]) || []);
+    for (let i = 1; i < sorted.length && inter.size > 0; i++) {
+      const o = sessStudents.get(sorted[i]) || new Set();
+      for (const sid of inter) { if (!o.has(sid)) inter.delete(sid); }
+    }
+    lec.presentInAll = inter;
+  }
+  return lectureMap;
+}
+
+// ── GET /student/:studentId/history/:courseId ─────────────────────────────────
+router.get('/:studentId/history/:courseId', authenticate, async (req, res, next) => {
+  try {
+    const { studentId, courseId } = req.params;
+    if (req.user.role === 'student' && req.user.user_id !== studentId) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    const sessions    = await Session.find({ course: courseId }).sort({ scheduledTime: 1 }).lean();
+    const sessionUIDs = sessions.map(s => s.sessionUID);
+
+    const records = await Attendance.find({
+      sessionUID: { $in: sessionUIDs },
+    }).lean(); // fetch ALL students so intersection works correctly
+
+    const lectureMap = buildLectureAttendance(sessions, records);
+
+    // Build per-lecture history for this student
+    // Group sessions by lectureUID for per-session detail
+    const sessByLecture = {};
+    for (const s of sessions) {
+      if (!sessByLecture[s.lectureUID]) sessByLecture[s.lectureUID] = [];
+      sessByLecture[s.lectureUID].push(s);
+    }
+
+    const lectureUIDs = [...new Set(sessions.map(s => s.lectureUID))];
+
+    const history = lectureUIDs.map(lectureUID => {
+      const key      = `${courseId}::${lectureUID}`;
+      const lec      = lectureMap.get(key);
+      const attended = lec?.presentInAll?.has(studentId) || false;
+      const lecSess  = sessByLecture[lectureUID] || [];
+
+      // Per-session: did this student mark in this session?
+      const sessionDetail = lecSess.map(s => {
+        const rec = records.find(r => r.sessionUID === s.sessionUID && r.student === studentId);
+        return {
+          sessionUID:  s.sessionUID,
+          method:      s.method,
+          timestamp:   s.timestamp,
+          marked:      !!rec,
+          verifiedVia: rec?.verifiedVia || null,
+          markedAt:    rec?.markedAt || null,
+        };
+      });
+
+      return {
+        lectureUID,
+        scheduledTime: lecSess[0]?.scheduledTime,
+        sessionCount:  lecSess.length,
+        sessions:      sessionDetail,
+        // true only if the student was marked in ALL sessions of this lecture
+        attended,
+      };
+    }).sort((a, b) => new Date(a.scheduledTime) - new Date(b.scheduledTime));
+
+    const attendedCount = history.filter(h => h.attended).length;
+    const total         = history.length;
+
+    res.json({
+      studentId,
+      courseId,
+      attended:   attendedCount,
+      total,
+      percentage: total > 0 ? parseFloat(((attendedCount / total) * 100).toFixed(1)) : 0,
+      history,
+    });
+  } catch (err) { next(err); }
+});
+
+// ── GET /student/:studentId/courses ──────────────────────────────────────────
+router.get('/:studentId/courses', authenticate, async (req, res, next) => {
+  try {
+    const { studentId } = req.params;
+    if (req.user.role === 'student' && req.user.user_id !== studentId) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    const enrollments = await Enrollment.find({ student: studentId, status: 'Active' }).lean();
+    const courseIds   = enrollments.map(e => e.course);
+
+    const bucket = await Bucket.findOne({ studentUID: studentId }).lean();
+    const bucketMap = Object.fromEntries(
+      (bucket?.courses || []).map(c => [c.courseUID, c])
+    );
+
+    res.json(courseIds.map(cid => ({
+      courseId:        cid,
+      lecturesAttended: bucketMap[cid]?.lectures?.length || 0,
+    })));
+  } catch (err) { next(err); }
+});
+
+// ── GET /student/:studentId/profile ──────────────────────────────────────────
+router.get('/:studentId/profile', authenticate, async (req, res, next) => {
+  try {
+    const { studentId } = req.params;
+    if (req.user.role === 'student' && req.user.user_id !== studentId) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    const student = await Student.findById(studentId).select('-password').lean();
+    if (!student) return res.status(404).json({ error: 'Student not found' });
+    res.json(student);
+  } catch (err) { next(err); }
+});
+
+module.exports = router;
+
+---
+backend/scripts/db-indexes.js
+---
+/**
+ * db-indexes.js
+ *
+ * Run once after deployment to ensure all performance-critical indexes exist.
+ * Safe to re-run — MongoDB ignores already-existing indexes.
+ *
+ *   node scripts/db-indexes.js
+ */
+require('dotenv').config({ path: require('path').join(__dirname, '../.env') });
+const mongoose = require('mongoose');
+
+async function createIndexes() {
+  await mongoose.connect(process.env.MONGO_URI || 'mongodb://localhost:27017/attendance');
+  const db = mongoose.connection.db;
+
+  console.log('Creating indexes...\n');
+
+  const tasks = [
+    // ── Attendance ────────────────────────────────────────────────────────────
+    // Core read: "all attendance for a session" (polled every 3s during class)
+    { col: 'attendances', idx: { sessionUID: 1 },            opts: { name: 'att_session' } },
+    // Core write uniqueness
+    { col: 'attendances', idx: { sessionUID: 1, student: 1 }, opts: { name: 'att_session_student', unique: true } },
+    // Student history lookups
+    { col: 'attendances', idx: { student: 1 },               opts: { name: 'att_student' } },
+    // Analytics aggregations: student+session combined
+    { col: 'attendances', idx: { student: 1, sessionUID: 1 }, opts: { name: 'att_student_session' } },
+
+    // ── Session ───────────────────────────────────────────────────────────────
+    // Active session check (called every 30s by SchedulerContext per course)
+    { col: 'sessions', idx: { course: 1, timestamp: -1 },    opts: { name: 'sess_course_ts' } },
+    // Used in active-session expiry $expr query
+    { col: 'sessions', idx: { course: 1 },                   opts: { name: 'sess_course' } },
+    // Lecture lookup
+    { col: 'sessions', idx: { course: 1, lectureUID: 1 },    opts: { name: 'sess_course_lecture' } },
+    // Session by UID (primary lookup)
+    { col: 'sessions', idx: { sessionUID: 1 },               opts: { name: 'sess_uid', unique: true } },
+
+    // ── Enrollment ────────────────────────────────────────────────────────────
+    { col: 'enrollments', idx: { student: 1, course: 1 },    opts: { name: 'enr_student_course', unique: true } },
+    { col: 'enrollments', idx: { course: 1, status: 1 },     opts: { name: 'enr_course_status' } },
+    { col: 'enrollments', idx: { student: 1, status: 1 },    opts: { name: 'enr_student_status' } },
+
+    // ── Course ────────────────────────────────────────────────────────────────
+    { col: 'courses', idx: { instructors: 1 },               opts: { name: 'course_instructors' } },
+    { col: 'courses', idx: { tas: 1 },                       opts: { name: 'course_tas' } },
+    // Lecture scheduled time (used by autoSessionService every minute)
+    { col: 'courses', idx: { 'lectures.scheduledTime': 1 },  opts: { name: 'course_lec_time' } },
+
+    // ── Student ───────────────────────────────────────────────────────────────
+    { col: 'students', idx: { email: 1 },                    opts: { name: 'student_email', unique: true } },
+
+    // ── Professor ─────────────────────────────────────────────────────────────
+    { col: 'professors', idx: { email: 1 },                  opts: { name: 'prof_email', unique: true } },
+
+    // ── Bucket ────────────────────────────────────────────────────────────────
+    { col: 'buckets', idx: { studentUID: 1 },                opts: { name: 'bucket_student', unique: true } },
+    { col: 'buckets', idx: { lastUpdated: -1 },              opts: { name: 'bucket_updated' } },
+
+    // ── Beacon ────────────────────────────────────────────────────────────────
+    { col: 'beacons', idx: { bleID: 1 },                     opts: { name: 'beacon_bleid', unique: true } },
+    { col: 'beacons', idx: { classroom: 1 },                 opts: { name: 'beacon_classroom' } },
+  ];
+
+  for (const { col, idx, opts } of tasks) {
+    try {
+      await db.collection(col).createIndex(idx, { background: true, ...opts });
+      console.log(`  ✓ ${col} [${Object.keys(idx).join(', ')}]`);
+    } catch (e) {
+      if (e.code === 85 || e.code === 86) {
+        console.log(`  ~ ${col} [${Object.keys(idx).join(', ')}] — already exists (skipped)`);
+      } else {
+        console.error(`  ✗ ${col}: ${e.message}`);
+      }
+    }
+  }
+
+  console.log('\nDone.');
+  await mongoose.disconnect();
+}
+
+createIndexes().catch(e => { console.error(e); process.exit(1); });
+
+---
+backend/scripts/seed.js
+---
+/**
+ * seed.js — Realistic seed data for DIAMS.
+ *
+ * Fixes:
+ *  - Uses populateLectures() so each course gets real slot-based lectures
+ *  - Marks all lectures before today as cancelled=false (they happened),
+ *    lectures in the future as not yet cancelled
+ *  - Sessions are created only for past lectures (can't attend future ones)
+ *  - 1-2 sessions per lecture (BLE at start, QR at end for ~40% of lectures)
+ *  - Attendance obeys the intersection rule:
+ *      a student is "present" only if they attended ALL sessions of that lecture
+ *  - Realistic attendance rates: each student has a base attendance probability
+ *    drawn from N(0.78, 0.12), clamped to [0.40, 0.98]
+ *  - TAs are Professors (not students) — matches the Professor model
+ *  - Classrooms have proper names
+ *  - Beacon IDs match classroom IDs
+ */
+require('dotenv').config();
+const mongoose = require('mongoose');
+const bcrypt   = require('bcryptjs');
+const { v4: uuidv4 } = require('uuid');
+
+const Student    = require('../models/Student');
+const Professor  = require('../models/Professor');
+const Admin      = require('../models/Admin');
+const Course     = require('../models/Course');
+const Session    = require('../models/Session');
+const Attendance = require('../models/Attendance');
+const Enrollment = require('../models/Enrollment');
+const Classroom  = require('../models/Classroom');
+const Beacon     = require('../models/Beacon');
+const Bucket     = require('../models/Bucket');
+
+const { populateLectures } = require('../utils/lecturePopulator');
+const { rebuildAllBuckets } = require('../services/bucketService');
+
+const MONGO_URI    = process.env.MONGO_URI || 'mongodb://localhost:27017/attendance';
+const NUM_STUDENTS = 80;   // realistic class size per course ~60-70 after enrollment
+const HASH_ROUNDS  = 8;    // faster for seed
+
+const rand   = (lo, hi) => lo + Math.random() * (hi - lo);
+const randInt = (lo, hi) => Math.floor(rand(lo, hi + 1));
+const pick   = (arr)    => arr[Math.floor(Math.random() * arr.length)];
+
+/** Normal distribution approximation (Box-Muller) */
+function randNormal(mean, std) {
+  let u = 0, v = 0;
+  while (u === 0) u = Math.random();
+  while (v === 0) v = Math.random();
+  return mean + std * Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+}
+
+function clamp(x, lo, hi) { return Math.max(lo, Math.min(hi, x)); }
+
+async function seed() {
+  await mongoose.connect(MONGO_URI, { maxPoolSize: 5 });
+  console.log('Connected to MongoDB');
+
+  // ── Wipe everything ────────────────────────────────────────────────────────
+  await Promise.all([
+    Student.deleteMany({}),
+    Professor.deleteMany({}),
+    Admin.deleteMany({}),
+    Course.deleteMany({}),
+    Session.deleteMany({}),
+    Attendance.deleteMany({}),
+    Enrollment.deleteMany({}),
+    Classroom.deleteMany({}),
+    Beacon.deleteMany({}),
+    Bucket.deleteMany({}),
+  ]);
+  console.log('Cleared existing data');
+
+  // ── Admin ──────────────────────────────────────────────────────────────────
+  await Admin.create({
+    _id:      'admin',
+    email:    'admin@iith.ac.in',
+    password: await bcrypt.hash('adminpass', HASH_ROUNDS),
+  });
+
+  // ── Professors ─────────────────────────────────────────────────────────────
+  const profData = [
+    { _id: 'prof_arora',   name: 'Prof. Arora',   email: 'arora@iith.ac.in',   department: 'CSE' },
+    { _id: 'prof_mehta',   name: 'Prof. Mehta',   email: 'mehta@iith.ac.in',   department: 'CSE' },
+    { _id: 'prof_suresh',  name: 'Prof. Suresh',  email: 'suresh@iith.ac.in',  department: 'EE'  },
+    { _id: 'prof_kapoor',  name: 'Prof. Kapoor',  email: 'kapoor@iith.ac.in',  department: 'MA'  },
+  ];
+  const profs = [];
+  for (const pd of profData) {
+    profs.push(await Professor.create({
+      ...pd,
+      password: await bcrypt.hash('prof123', HASH_ROUNDS),
+    }));
+  }
+  console.log(`Created ${profs.length} professors`);
+
+  // ── Students ───────────────────────────────────────────────────────────────
+  const FIRST_NAMES = [
+    'Aditya','Bhavna','Chetan','Deepika','Eshan','Fatima','Gaurav','Hira',
+    'Ishaan','Jyoti','Karthik','Lakshmi','Manish','Nandini','Om','Priya',
+    'Rahul','Sneha','Tarun','Usha','Vikram','Waqar','Xenia','Yash','Zara',
+    'Arjun','Bindu','Chirag','Divya','Eshwar','Faisal','Gayatri','Harsh',
+    'Isha','Jayesh','Kavya','Lokesh','Meghna','Nikhil','Omi','Pooja',
+  ];
+  const LAST_NAMES = [
+    'Sharma','Verma','Patel','Singh','Kumar','Gupta','Reddy','Nair',
+    'Joshi','Iyer','Pillai','Mehta','Kapoor','Bose','Das','Roy',
+  ];
+
+  const students = [];
+  const pwHash   = await bcrypt.hash('stud123', HASH_ROUNDS);
+
+  for (let i = 1; i <= NUM_STUDENTS; i++) {
+    const fn = pick(FIRST_NAMES);
+    const ln = pick(LAST_NAMES);
+    const name = `${fn} ${ln}`;
+    const id   = `CS22B${String(i).padStart(4,'0')}`;
+    students.push(await Student.create({
+      _id:      id,
+      name,
+      email:    `${id.toLowerCase()}@iith.ac.in`,
+      password: pwHash,
+      imageURL: `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(name)}`,
+    }));
+  }
+  console.log(`Created ${students.length} students`);
+
+  // ── Classrooms ─────────────────────────────────────────────────────────────
+  const classroomData = [
+    { _id: 'LH-1',  capacity: 120 },
+    { _id: 'LH-2',  capacity: 90  },
+    { _id: 'LH-7',  capacity: 100 },
+    { _id: 'LH-12', capacity: 80  },
+  ];
+  for (const cd of classroomData) await Classroom.create(cd);
+
+  // ── Beacons (3 per classroom) ──────────────────────────────────────────────
+  for (const cd of classroomData) {
+    for (let b = 1; b <= 3; b++) {
+      await Beacon.create({
+        bleID:     `${cd._id}-BLE-${b}`,
+        classroom: cd._id,
+      });
+    }
+  }
+
+  // ── Courses ────────────────────────────────────────────────────────────────
+  const courseDefinitions = [
+    {
+      _id: 'CS3101', name: 'Data Structures & Algorithms',
+      department: 'CSE', slot: 'A', venue: 'LH-1',
+      instructors: ['prof_arora'], tas: ['prof_mehta'],
+    },
+    {
+      _id: 'CS3201', name: 'Database Management Systems',
+      department: 'CSE', slot: 'B', venue: 'LH-2',
+      instructors: ['prof_mehta'], tas: [],
+    },
+    {
+      _id: 'EE3101', name: 'Signals & Systems',
+      department: 'EE', slot: 'E', venue: 'LH-7',
+      instructors: ['prof_suresh'], tas: ['prof_kapoor'],
+    },
+    {
+      _id: 'MA2101', name: 'Linear Algebra',
+      department: 'MA', slot: 'C', venue: 'LH-12',
+      instructors: ['prof_kapoor'], tas: [],
+    },
+  ];
+
+  const START_DATE = new Date('2026-1-01'); // semester start
+  const END_DATE   = new Date('2026-4-30'); // semester end
+  const now        = new Date();
+
+  const courses = [];
+  for (const cd of courseDefinitions) {
+    const { lectures, schedules } = populateLectures({
+      ...cd,
+      startDate: START_DATE,
+      endDate:   END_DATE,
+    });
+
+    // Past lectures: not cancelled (they happened)
+    // Future lectures: leave cancelled=false (not yet held)
+    const markedLectures = lectures.map(l => ({
+      ...l,
+      cancelled: false,
+    }));
+
+    const course = await Course.create({
+      ...cd,
+      startDate: START_DATE,
+      endDate:   END_DATE,
+      lectures:  markedLectures,
+      schedules,
+    });
+    courses.push(course);
+  }
+  console.log(`Created ${courses.length} courses`);
+
+  // ── Enrollments ────────────────────────────────────────────────────────────
+  // Each student enrolls in 2-4 randomly selected courses (~75% enrollment rate)
+  const enrollmentOps = [];
+  for (const student of students) {
+    const courseCount = randInt(2, 4);
+    const shuffled    = [...courses].sort(() => Math.random() - 0.5);
+    const enrolled    = shuffled.slice(0, courseCount);
+    for (const course of enrolled) {
+      enrollmentOps.push({
+        updateOne: {
+          filter: { student: student._id, course: course._id },
+          update: { $set: { status: 'Active', enrollmentDate: new Date(START_DATE) } },
+          upsert: true,
+        },
+      });
+    }
+  }
+  await Enrollment.bulkWrite(enrollmentOps);
+  const totalEnrollments = await Enrollment.countDocuments({ status: 'Active' });
+  console.log(`Created ${totalEnrollments} enrollments`);
+
+  // ── Sessions & Attendance ──────────────────────────────────────────────────
+  // For each course, create sessions only for past lectures.
+  // 60% of past lectures → 1 session (BLE or QR)
+  // 40% → 2 sessions (BLE at start + QR at end, simulating hybrid)
+  // Attendance: per-student attendance probability drawn from N(0.78, 0.12).
+  // For 2-session lectures: student attends BOTH sessions with probability p,
+  // only first with probability p*(1-0.2), only second with p*(1-0.2),
+  // neither with (1-p)^2 — so lecture attendance ~ p^1.3 (more realistic).
+
+  let sessionCount   = 0;
+  let attendanceCount = 0;
+
+  for (const course of courses) {
+    // Get all actively enrolled students for this course
+    const enrollments = await Enrollment.find({ course: course._id, status: 'Active' }).lean();
+    const enrolledIds = enrollments.map(e => String(e.student));
+
+    // Assign per-student attendance probability
+    const studentProb = {};
+    for (const sid of enrolledIds) {
+      studentProb[sid] = clamp(randNormal(0.78, 0.12), 0.40, 0.98);
+    }
+
+    const pastLectures = course.lectures.filter(l =>
+      !l.cancelled && new Date(l.scheduledTime) < now
+    );
+
+    for (const lecture of pastLectures) {
+      const twoSessions = Math.random() < 0.40; // 40% chance of 2 sessions
+      const methods = twoSessions
+        ? ['BLE', 'QRCode']
+        : [pick(['BLE', 'QRCode', 'Manual'])];
+
+      const sessionDocs = [];
+      for (const method of methods) {
+        const sessionUID = uuidv4();
+        // Slight offset: QR session starts 45 min after BLE
+        const offset = method === 'QRCode' && twoSessions ? 45 : 0;
+        const ts     = new Date(lecture.scheduledTime.getTime() + offset * 60000);
+
+        await Session.create({
+          sessionUID,
+          course:          course._id,
+          lectureUID:      lecture.lectureUID,
+          scheduledTime:   lecture.scheduledTime,
+          duration:        50,
+          method,
+          isAutoGenerated: false,
+          timestamp:       ts,
+          active:          false,
+        });
+        sessionDocs.push({ sessionUID, method });
+        sessionCount++;
+      }
+
+      // Build attendance marks
+      const attendanceOps = [];
+      for (const sid of enrolledIds) {
+        const p = studentProb[sid];
+
+        if (sessionDocs.length === 1) {
+          // Single session — student attends with probability p
+          if (Math.random() < p) {
+            const ts = new Date(
+              lecture.scheduledTime.getTime() + randInt(0, 15) * 60000
+            );
+            attendanceOps.push({
+              sessionUID:  sessionDocs[0].sessionUID,
+              student:     sid,
+              verifiedVia: sessionDocs[0].method,
+              markedAt:    ts,
+            });
+          }
+        } else {
+          // Two sessions — model: student attends each with P(attend) = p
+          // but independent (some miss QR, some miss BLE)
+          // Intersection = attended BOTH
+          for (const sess of sessionDocs) {
+            // Slightly correlated: if student tends to attend, higher chance for both
+            const thisSessP = sess.method === 'QRCode' ? p * 0.92 : p;
+            if (Math.random() < thisSessP) {
+              const ts = new Date(
+                new Date(lecture.scheduledTime).getTime() +
+                (sess.method === 'QRCode' ? 45 : 0) * 60000 +
+                randInt(0, 10) * 60000
+              );
+              attendanceOps.push({
+                sessionUID:  sess.sessionUID,
+                student:     sid,
+                verifiedVia: sess.method,
+                markedAt:    ts,
+              });
+            }
+          }
+        }
+      }
+
+      if (attendanceOps.length > 0) {
+        await Attendance.insertMany(attendanceOps, { ordered: false }).catch(() => {});
+        attendanceCount += attendanceOps.length;
+      }
+    }
+  }
+
+  console.log(`Created ${sessionCount} sessions`);
+  console.log(`Created ${attendanceCount} attendance records`);
+
+  // ── Rebuild bucket cache ───────────────────────────────────────────────────
+  console.log('Rebuilding bucket cache...');
+  await rebuildAllBuckets();
+  console.log('Bucket cache rebuilt');
+
+  console.log('\n✅ Seeding complete!');
+  console.log('\nDemo credentials:');
+  console.log('  Admin:     admin@iith.ac.in / adminpass');
+  console.log('  Prof:      arora@iith.ac.in / prof123');
+  console.log('  Prof (TA): mehta@iith.ac.in / prof123');
+  console.log('  Student:   cs22b0001@iith.ac.in / stud123');
+
+  await mongoose.disconnect();
+  process.exit(0);
+}
+
+seed().catch(err => {
+  console.error('Seed failed:', err);
+  process.exit(1);
+});
+
+---
+backend/utils/lecturePopulator.js
+---
+const { v4: uuidv4 } = require('uuid');
+
+// SLOT → days of week (0=Sun…6=Sat) + time windows
+// These are example VIT-style slot mappings. Adjust to your institution.
+const SLOT_MAP = {
+  A: [
+    { day: 1, start: '09:00', end: '09:55' },
+    { day: 3, start: '11:00', end: '11:55' },
+    { day: 4, start: '10:00', end: '10:55' }
+  ],
+
+  B: [
+    { day: 1, start: '10:00', end: '10:55' },
+    { day: 3, start: '09:00', end: '09:55' },
+    { day: 4, start: '11:00', end: '11:55' }
+  ],
+
+  C: [
+    { day: 1, start: '11:00', end: '11:55' },
+    { day: 3, start: '10:00', end: '10:55' },
+    { day: 4, start: '09:00', end: '09:55' }
+  ],
+
+  D: [
+    { day: 1, start: '12:00', end: '12:55' },
+    { day: 2, start: '09:00', end: '09:55' },
+    { day: 5, start: '11:00', end: '11:55' }
+  ],
+
+  E: [
+    { day: 2, start: '10:00', end: '10:55' },
+    { day: 4, start: '12:00', end: '12:55' },
+    { day: 5, start: '09:00', end: '09:55' }
+  ],
+
+  F: [
+    { day: 2, start: '11:00', end: '11:55' },
+    { day: 3, start: '14:30', end: '15:55' },
+    { day: 5, start: '10:00', end: '10:55' }
+  ],
+
+  G: [
+    { day: 2, start: '12:00', end: '12:55' },
+    { day: 3, start: '12:00', end: '12:55' },
+    { day: 5, start: '12:00', end: '12:55' }
+  ],
+
+  P: [
+    { day: 1, start: '14:30', end: '15:55' },
+    { day: 4, start: '16:00', end: '17:25' }
+  ],
+
+  Q: [
+    { day: 1, start: '16:00', end: '17:25' },
+    { day: 4, start: '14:30', end: '15:55' }
+  ],
+
+  R: [
+    { day: 2, start: '14:30', end: '15:55' },
+    { day: 5, start: '16:00', end: '17:25' }
+  ],
+
+  S: [
+    { day: 2, start: '16:00', end: '17:25' },
+    { day: 5, start: '14:30', end: '15:55' }
+  ],
+
+  W: [
+    { day: 1, start: '17:30', end: '19:00' },
+    { day: 4, start: '17:30', end: '19:00' }
+  ],
+
+  X: [
+    { day: 1, start: '19:00', end: '20:30' },
+    { day: 4, start: '19:00', end: '20:30' }
+  ],
+
+  Y: [
+    { day: 2, start: '17:30', end: '19:00' },
+    { day: 5, start: '17:30', end: '19:00' }
+  ],
+
+  Z: [
+    { day: 2, start: '19:00', end: '20:30' },
+    { day: 5, start: '19:00', end: '20:30' }
+  ]
+};
+
+const DAY_NAMES = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+
+/**
+ * Given a course (with slot, startDate, endDate),
+ * generate the full lecture list using SLOT_MAP.
+ * Also populates the `schedules` array on the course.
+ */
+function populateLectures(course) {
+  const slotWindows = SLOT_MAP[course.slot] || [];
+  const lectures = [];
+  const schedules = [];
+
+  // Build schedules array from slot windows
+  for (const w of slotWindows) {
+    schedules.push({
+      scheduledDay: DAY_NAMES[w.day],
+      startTime: w.start,
+      endTime:   w.end,
+      method:    'BLE',
+      switch:    false,
+    });
+  }
+
+  // Walk every day from startDate to endDate
+  const cursor = new Date(course.startDate);
+  const end    = new Date(course.endDate);
+  cursor.setHours(0, 0, 0, 0);
+  end.setHours(23, 59, 59, 999);
+
+  while (cursor <= end) {
+    const dow = cursor.getDay(); // 0=Sun…6=Sat
+    for (const w of slotWindows) {
+      if (w.day === dow) {
+        const [hh, mm] = w.start.split(':').map(Number);
+        const scheduledTime = new Date(cursor);
+        scheduledTime.setHours(hh, mm, 0, 0);
+
+        lectures.push({
+          lectureUID:    uuidv4(),
+          scheduledTime,
+          cancelled:     false,
+        });
+      }
+    }
+    cursor.setDate(cursor.getDate() + 1);
+  }
+
+  return { lectures, schedules };
+}
+
+module.exports = { populateLectures, SLOT_MAP };
+
+---
+backend/models/Admin.js
+---
+const mongoose = require('mongoose');
+
+const AdminSchema = new mongoose.Schema({
+  _id: {
+    type: String,
+    required: true,
+    unique: true,
+    trim: true
+  },
+  password: {
+    type: String,
+    required: true
+  },
+  email: {
+    type: String,
+    unique: true,
+    sparse: true
+  },
+  createdAt: {
+    type: Date,
+    default: Date.now
+  }
+}, { _id: false });
+
+module.exports = mongoose.model('Admin', AdminSchema);
+
+
+---
+backend/models/Attendance.js
+---
+const mongoose = require('mongoose');
+const { v4: uuidv4 } = require('uuid');
+
+const AttendanceSchema = new mongoose.Schema({
+  sessionUID: {
+  type: String,
+  required: true
+  },
+  student: {
+    type: String,
+    required: true,
+    ref: 'Student'
+  },
+  timestamp: {
+    type: Date,
+    default: Date.now
+  },
+  markedAt: Date,
+  verifiedVia: {
+    type: String,
+    required: true,
+    enum: ['BLE', 'QRCode', 'Manual'],
+  }
+});
+
+AttendanceSchema.index(
+  { sessionUID: 1, student: 1 },
+  { unique: true }
+);
+module.exports = mongoose.model('Attendance', AttendanceSchema);
+
+
+---
+backend/models/Beacon.js
+---
+const mongoose = require('mongoose');
+const { v4: uuidv4 } = require('uuid');
+
+const BeaconSchema = new mongoose.Schema({
+  bleID: {
+    type: String,
+    required: true,
+    unique: true
+  },
+  classroom: {
+    type: String,
+    required: true,
+    ref: 'Classroom'
+  },
+  createdAt: {
+    type: Date,
+    default: Date.now
+  }
+});
+
+
+module.exports = mongoose.model('Beacon', BeaconSchema);
+
+
+---
+backend/models/Bucket.js
+---
+const mongoose = require('mongoose');
+
+// This is the cache for the attendance records for each student across all their courses and lectures.
+
+const BucketSchema = new mongoose.Schema({
+  studentUID: {
+    type: String,
+    required: true,
+    unique: true
+  },
+  courses: [{
+    courseUID: String,
+    lectures: [{
+      lectureUID: String,
+      attendance: {
+        type: Map,
+        of: String,
+        default: {}
+      }
+    }]
+  }],
+  lastUpdated: {
+    type: Date,
+    default: Date.now
+  }
+});
+
+module.exports = mongoose.model('Bucket', BucketSchema);
+
+
+---
+backend/models/Classroom.js
+---
+const mongoose = require('mongoose');
+const { v4: uuidv4 } = require('uuid');
+
+const ClassroomSchema = new mongoose.Schema({
+  _id: {
+    type: String,
+    required: true,
+    unique: true,
+    trim: true
+  },
+  capacity: Number,
+  createdAt: {
+    type: Date,
+    default: Date.now
+  }
+}, { _id: false });
+
+module.exports = mongoose.model('Classroom', ClassroomSchema);
+
+
+---
+backend/models/Course.js
+---
+const mongoose = require('mongoose');
+const { v4: uuidv4 } = require('uuid');
+const Session = require('./Session');
+
+const CourseSchema = new mongoose.Schema({
+  _id: {
+    type: String,
+    required: true,
+    unique: true,
+    trim: true
+  },
+  name: {
+    type: String,
+    required: true
+    // trim: true
+  },
+  department: {
+    type: String,
+    required: true
+  },
+  slot: {
+    type: String,
+    required: true,
+    enum: ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'P', 'Q', 'R', 'S', 'W', 'X', 'Y', 'Z']
+  },
+  venue: {
+    type: String,
+    required: true,
+    ref: 'Classroom'
+  },
+  startDate: {
+    type: Date,
+    required: true
+  },
+  endDate: {
+    type: Date,
+    required: true
+  },
+  instructors: [{ type: String, ref: 'Professor' }],
+  tas: [{ type: String, ref: 'Student' }],
+  lectures: [{
+    lectureUID: {
+      type: String,
+      required: true,
+    },
+    scheduledTime: {
+      type: Date,
+      required: true
+    },
+    cancelled: {
+      type: Boolean,
+      default: false
+    }
+  }],
+  schedules: [{
+    scheduledDay: {
+      type: String,
+      enum: ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'],
+      required: true
+    },
+    startTime: {
+      type: String,
+      required: true
+    },
+    endTime: {
+      type: String,
+      required: true
+    },
+    method : {
+      type: String,
+      enum: ['BLE', 'QRCode', 'Manual'],
+      default: 'BLE'
+    }, 
+    switch: {
+      type: Boolean,
+      default: false
+    }
+  }],
+  createdAt: {
+    type: Date,
+    default: Date.now
+  }
+}, { _id: false });
+
+CourseSchema.index(
+  { _id: 1, "lectures.lectureUID": 1 },
+  { unique: true }
+);
+module.exports = mongoose.model('Course', CourseSchema);
+
+
+---
+backend/models/Enrollment.js
+---
+const mongoose = require('mongoose');
+const { v4: uuidv4 } = require('uuid');
+
+const EnrollmentSchema = new mongoose.Schema({
+  student: {
+    type: String,
+    required: true,
+    ref: 'Student'
+  },
+  course: {
+    type: String,
+    required: true,
+    ref: 'Course'
+  },
+  enrollmentDate: {
+    type: Date,
+    default: Date.now
+  },
+  status: {
+    type: String,
+    enum: ['Active', 'Completed', 'Dropped'],
+    default: 'Active'
+  }
+});
+
+EnrollmentSchema.index(
+  { student: 1, course: 1 },
+  { unique: true }
+);
+module.exports = mongoose.model('Enrollment', EnrollmentSchema);
+
+
+---
+backend/models/Professor.js
+---
+const mongoose = require('mongoose');
+
+const ProfessorSchema = new mongoose.Schema({
+  _id: {
+    type: String,
+    required: true,
+    unique: true,
+    trim: true
+  },
+  name: {
+    type: String,
+    required: true
+    // trim: true
+  },
+  password: {
+    type: String,
+    required: true
+  },
+  email: {
+    type: String,
+    unique: true,
+    required: true
+  },
+  department: {
+    type: String,
+    default: null
+  },
+  createdAt: {
+    type: Date,
+    default: Date.now
+  }
+}, { _id: false });
+
+module.exports = mongoose.model('Professor', ProfessorSchema);
+
+
+---
+backend/models/Session.js
+---
+const mongoose = require('mongoose');
+const { v4: uuidv4 } = require('uuid');
+
+const SessionSchema = new mongoose.Schema({
+  sessionUID: {
+    type:    String,
+    default: uuidv4,
+    unique:  true,
+  },
+  course: {
+    type:     String,
+    required: true,
+    ref:      'Course',
+  },
+  lectureUID: {
+    type:     String,
+    required: true,
+    // NOT unique per course — a lecture can have many sessions (BLE + QR, etc.)
+  },
+  scheduledTime: {
+    type:     Date,
+    required: true,
+  },
+  duration: {
+    type:     Number, // minutes — kept for reference, no longer used for active check
+    required: true,
+  },
+  method: {
+    type:     String,
+    enum:     ['BLE', 'QRCode', 'Manual'],
+    required: true,
+  },
+  isAutoGenerated: {
+    type:    Boolean,
+    default: false,
+  },
+  // ── Active flag (replaces the duration-based expiry hack) ────────────────────
+  // true  = session is currently running
+  // false = session was ended (via endSession or auto-expiry cron)
+  active: {
+    type:    Boolean,
+    default: true,
+    index:   true,
+  },
+  endedAt: {
+    type:    Date,
+    default: null,
+  },
+  timestamp: {
+    type:    Date,
+    default: Date.now,
+  },
+});
+
+// Compound index: most common query pattern
+SessionSchema.index({ course: 1, active: 1 });              // GET /activeSession
+SessionSchema.index({ course: 1, lectureUID: 1 });           // analytics grouping
+SessionSchema.index({ course: 1, lectureUID: 1, method: 1, active: 1 }); // duplicate guard
+SessionSchema.index({ sessionUID: 1 }, { unique: true });    // primary lookup
+SessionSchema.index({ timestamp: -1 });                      // admin sessions list
+
+module.exports = mongoose.model('Session', SessionSchema);
+
+---
+backend/models/Student.js
+---
+const mongoose = require('mongoose');
+
+const StudentSchema = new mongoose.Schema({
+  _id: {
+    type: String,
+    required: true,
+    unique: true,
+    trim: true
+  },
+  name: {
+    type: String,
+    required: true
+    // trim: true
+  },
+  password: {
+    type: String,
+    required: true
+  },
+  imageURL: {
+    type: String,
+    required: true
+    // default: null
+  },
+  email: {
+    type: String,
+    unique: true,
+    required: true
+  },
+  createdAt: {
+    type: Date,
+    default: Date.now
+  }
+}, { _id: false });
+
+module.exports = mongoose.model('Student', StudentSchema);
+
+
+---
+backend/jobs/index.js
+---
+const cron = require('node-cron');
+const { rebuildAllBuckets }          = require('../services/bucketService');
+const { autoCreateFallbackSessions } = require('../services/autoSessionService');
+const { runBackup }                  = require('../services/backupService');
+
+function startAllJobs() {
+  // ── Auto-session fallback: every minute ────────────────────────────────────
+  // Creates a 5-min BLE session for lectures with no active schedule
+  cron.schedule('* * * * *', async () => {
+    try { await autoCreateFallbackSessions(); }
+    catch (e) { console.error('[Cron:AutoSession]', e.message); }
+  });
+
+  // ── Bucket cache incremental rebuild: every 15 minutes ────────────────────
+  // This is a safety net; individual marks update the bucket in real-time
+  cron.schedule('*/15 * * * *', async () => {
+    try { await rebuildAllBuckets(); }
+    catch (e) { console.error('[Cron:Bucket]', e.message); }
+  });
+
+  // ── Nightly backup at 02:00 ────────────────────────────────────────────────
+  cron.schedule('0 2 * * *', async () => {
+    try { await runBackup(); }
+    catch (e) { console.error('[Cron:Backup]', e.message); }
+  });
+
+  console.log('[Cron] All jobs started');
+}
+
+module.exports = { startAllJobs };
+
+---
+backend/services/autoSessionService.js
+---
+const Course   = require('../models/Course');
+const Session  = require('../models/Session');
+
+const DAY_NAMES = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+
+async function autoCreateFallbackSessions() {
+  const now         = new Date();
+  const todayName   = DAY_NAMES[now.getDay()];
+  const windowStart = new Date(now.getTime() - 2 * 60000);
+  const windowEnd   = new Date(now.getTime() + 2 * 60000);
+
+  const courses = await Course.find({
+    'lectures.scheduledTime': { $gte: windowStart, $lte: windowEnd },
+    'lectures.cancelled':     false,
+  }).lean();
+
+  for (const course of courses) {
+    const dueLectures = course.lectures.filter(l =>
+      !l.cancelled &&
+      new Date(l.scheduledTime) >= windowStart &&
+      new Date(l.scheduledTime) <= windowEnd
+    );
+
+    for (const lecture of dueLectures) {
+      const lecTime = new Date(lecture.scheduledTime);
+      const lecMin  = lecTime.getHours() * 60 + lecTime.getMinutes();
+
+      const covered = (course.schedules || []).some(s => {
+        if (s.scheduledDay !== todayName) return false;
+        const [sh, sm] = s.startTime.split(':').map(Number);
+        const [eh, em] = s.endTime.split(':').map(Number);
+        return lecMin >= sh * 60 + sm && lecMin < eh * 60 + em;
+      });
+
+      if (covered) continue;
+
+      // Check if any active session already exists for this lecture
+      const existing = await Session.findOne({
+        course:     course._id,
+        lectureUID: lecture.lectureUID,
+        active:     true,
+      }).lean();
+
+      if (existing) continue;
+
+      await Session.create({
+        course:          course._id,
+        lectureUID:      lecture.lectureUID,
+        scheduledTime:   lecture.scheduledTime,
+        duration:        5,
+        method:          'BLE',
+        isAutoGenerated: true,
+        active:          true,
+      });
+
+      console.log(`[AutoSession] 5-min BLE fallback for ${course._id} / ${lecture.lectureUID}`);
+    }
+  }
+}
+
+module.exports = { autoCreateFallbackSessions };
+
+---
+backend/services/backupService.js
+---
+const fs   = require('fs');
+const path = require('path');
+
+const MODELS = [
+  require('../models/Admin'),
+  require('../models/Professor'),
+  require('../models/Student'),
+  require('../models/Course'),
+  require('../models/Enrollment'),
+  require('../models/Session'),
+  require('../models/Attendance'),
+  require('../models/Beacon'),
+  require('../models/Bucket'),
+];
+
+const BACKUP_DIR = process.env.BACKUP_DIR || path.join(__dirname, '../backups');
+
+async function runBackup() {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const dir   = path.join(BACKUP_DIR, stamp);
+  fs.mkdirSync(dir, { recursive: true });
+
+  for (const Model of MODELS) {
+    try {
+      const docs = await Model.find({}).lean();
+      const file = path.join(dir, `${Model.modelName}.json`);
+      fs.writeFileSync(file, JSON.stringify(docs, null, 2));
+      console.log(`[Backup] ${Model.modelName}: ${docs.length} docs → ${file}`);
+    } catch (e) {
+      console.error(`[Backup] Failed ${Model.modelName}: ${e.message}`);
+    }
+  }
+
+  // Prune: keep only the last 7 backups
+  pruneOldBackups(7);
+
+  console.log(`[Backup] Complete: ${stamp}`);
+}
+
+function pruneOldBackups(keep) {
+  try {
+    const dirs = fs.readdirSync(BACKUP_DIR)
+      .map(d => ({ name: d, mtime: fs.statSync(path.join(BACKUP_DIR, d)).mtime }))
+      .sort((a, b) => b.mtime - a.mtime);
+
+    for (const d of dirs.slice(keep)) {
+      fs.rmSync(path.join(BACKUP_DIR, d.name), { recursive: true, force: true });
+      console.log(`[Backup] Pruned old backup: ${d.name}`);
+    }
+  } catch {}
+}
+
+module.exports = { runBackup };
+
+---
+backend/services/bucketService.js
+---
+/**
+ * bucketService.js
+ *
+ * The Bucket is a per-student cache of which lectures they fully attended
+ * (present in ALL sessions of that lecture). It is used to:
+ *
+ *  1. Fast read in GET /admin/student/:id/analytics (avoids scanning Attendance)
+ *  2. Fast read in GET /student/:id/courses (quick attendance summary per course)
+ *  3. The Students page heatmap (already uses /student/:id/history which is live,
+ *     but the bucket lets us pre-compute overall pct per course cheaply)
+ *
+ * Write path: after every Attendance.mark, we call updateBucketForStudent(studentId)
+ * which rebuilds just that student's bucket. The nightly cron rebuilds all buckets
+ * as a safety net in case any incremental updates were missed.
+ */
+
+const Bucket     = require('../models/Bucket');
+const Attendance = require('../models/Attendance');
+const Enrollment = require('../models/Enrollment');
+const Session    = require('../models/Session');
+
+// ── Core intersection (copy of analytics logic — single source of truth) ───────
+function buildLectureAttendance(sessions, records) {
+  const lectureMap  = new Map();
+  for (const s of sessions) {
+    const key = `${s.course}::${s.lectureUID}`;
+    if (!lectureMap.has(key)) {
+      lectureMap.set(key, { courseId: String(s.course), lectureUID: s.lectureUID, sessionUIDs: [], presentInAll: null });
+    }
+    lectureMap.get(key).sessionUIDs.push(s.sessionUID);
+  }
+  const sessStudents = new Map();
+  for (const r of records) {
+    if (!sessStudents.has(r.sessionUID)) sessStudents.set(r.sessionUID, new Set());
+    sessStudents.get(r.sessionUID).add(r.student);
+  }
+  for (const lec of lectureMap.values()) {
+    if (!lec.sessionUIDs.length) { lec.presentInAll = new Set(); continue; }
+    const sorted = [...lec.sessionUIDs].sort(
+      (a, b) => (sessStudents.get(a)?.size || 0) - (sessStudents.get(b)?.size || 0)
+    );
+    let inter = new Set(sessStudents.get(sorted[0]) || []);
+    for (let i = 1; i < sorted.length && inter.size > 0; i++) {
+      const o = sessStudents.get(sorted[i]) || new Set();
+      for (const sid of inter) { if (!o.has(sid)) inter.delete(sid); }
+    }
+    lec.presentInAll = inter;
+  }
+  return lectureMap;
+}
+
+/**
+ * Rebuild bucket for one student.
+ * Bucket shape:
+ *   { studentUID, courses: [{ courseUID, lectures: [{ lectureUID }] }], lastUpdated }
+ *
+ * Each entry in lectures[] = a lecture where the student was present in ALL sessions.
+ */
+async function rebuildBucketForStudent(studentId) {
+  const enrollments = await Enrollment.find({ student: studentId, status: 'Active' }).lean();
+  const courseIds   = enrollments.map(e => e.course);
+
+  if (courseIds.length === 0) {
+    await Bucket.findOneAndUpdate(
+      { studentUID: studentId },
+      { $set: { courses: [], lastUpdated: new Date() } },
+      { upsert: true }
+    );
+    return;
+  }
+
+  const sessions = await Session.find({ course: { $in: courseIds } }).lean();
+  const records  = await Attendance.find({
+    sessionUID: { $in: sessions.map(s => s.sessionUID) },
+  }).lean();
+
+  const lectureMap   = buildLectureAttendance(sessions, records);
+  const courseDataMap = {};
+
+  for (const lec of lectureMap.values()) {
+    if (!lec.presentInAll.has(studentId)) continue;
+    if (!courseDataMap[lec.courseId]) courseDataMap[lec.courseId] = [];
+    courseDataMap[lec.courseId].push(lec.lectureUID);
+  }
+
+  const courses = courseIds.map(cid => ({
+    courseUID: String(cid),
+    lectures:  (courseDataMap[String(cid)] || []).map(luid => ({
+      lectureUID:  luid,
+      attendance:  { present: 'true' },
+    })),
+  }));
+
+  await Bucket.findOneAndUpdate(
+    { studentUID: studentId },
+    { $set: { courses, lastUpdated: new Date() } },
+    { upsert: true }
+  );
+}
+
+/**
+ * Fire-and-forget after each Attendance mark.
+ * Rebuilds only the affected student.
+ */
+async function updateBucketForStudent(studentId) {
+  return rebuildBucketForStudent(studentId).catch(err =>
+    console.error(`[Bucket] Update failed for ${studentId}:`, err.message)
+  );
+}
+
+/**
+ * Full rebuild — called by nightly cron and admin /rebuild-buckets.
+ */
+async function rebuildAllBuckets() {
+  const studentIds = await Enrollment.distinct('student');
+  console.log(`[BucketJob] Rebuilding ${studentIds.length} buckets...`);
+  const BATCH = 50;
+  for (let i = 0; i < studentIds.length; i += BATCH) {
+    await Promise.all(
+      studentIds.slice(i, i + BATCH).map(sid =>
+        rebuildBucketForStudent(sid).catch(e =>
+          console.error(`[BucketJob] ${sid}: ${e.message}`)
+        )
+      )
+    );
+  }
+  console.log('[BucketJob] Done.');
+}
+
+/**
+ * Read bucket for a student — used by the students page for quick per-course summary.
+ * Returns null if no bucket exists yet.
+ */
+async function getBucketForStudent(studentId) {
+  return Bucket.findOne({ studentUID: studentId }).lean();
+}
+
+module.exports = { updateBucketForStudent, rebuildBucketForStudent, rebuildAllBuckets, getBucketForStudent };
+
+---
+backend/config/db.js
+---
+require('dotenv').config();
+const mongoose = require('mongoose');
+
+const connectDB = async () => {
+  try {
+    await mongoose.connect(process.env.MONGODB_URI, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
+    });
+    console.log('MongoDB connected successfully');
+  } catch (error) {
+    console.error('MongoDB connection failed:', error);
+    process.exit(1);
+  }
+};
+
+module.exports = connectDB;
+
+
+---

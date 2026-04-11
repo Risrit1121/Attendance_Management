@@ -9,6 +9,8 @@ import CourseView         from "./pages/CourseView";
 import Analytics          from "./pages/Analytics";
 import AdminDashboard     from "./pages/AdminDashboard";
 import AdminOverview      from "./pages/AdminOverview";
+import AdminCourses       from "./pages/AdminCourses";
+import AdminStudents      from "./pages/AdminStudents";
 import Students           from "./pages/Students";
 
 function AppContent() {
@@ -32,7 +34,7 @@ function AppContent() {
   // TAs and profs share the same dashboard view
   const isProfOrTa = user.role === "prof" || user.role === "ta";
 
-  if (page === "courses" && activeCourse) {
+  if (page === "courses" && activeCourse && isProfOrTa) {
     return (
       <Layout page={page} setPage={handleSetPage}>
         <CourseView
@@ -50,6 +52,8 @@ function AppContent() {
           {page === "dashboard" && <AdminOverview />}
           {page === "analytics" && <Analytics />}
           {page === "admin"     && <AdminDashboard />}
+          {page === "courses"   && <AdminCourses />}
+          {page === "students"  && <AdminStudents />}
         </>
       ) : isProfOrTa ? (
         <>

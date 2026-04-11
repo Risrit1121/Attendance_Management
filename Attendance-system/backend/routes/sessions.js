@@ -1,3 +1,17 @@
+/**
+ * sessions.js — FIXES:
+ *
+ * 1. Ad-hoc lecture creation: when a session is started at an "odd hour"
+ *    (no matching scheduled lecture within ±30 min), a new lecture entry
+ *    is appended to Course.lectures with scheduledTime = now and a sensible
+ *    duration window. The session is then linked to that lectureUID.
+ *    This way analytics always has a proper lecture to group sessions under.
+ *
+ * 2. Active session uses active:true flag (from previous fix).
+ *
+ * 3. Lecture matching window: ±30 minutes around now to catch slightly
+ *    late/early session starts without creating spurious lectures.
+ */
 const express  = require('express');
 const { v4: uuidv4 } = require('uuid');
 const Session  = require('../models/Session');
@@ -6,22 +20,61 @@ const { authenticate } = require('../middleware/auth');
 
 const router = express.Router();
 
-// ── Helper ────────────────────────────────────────────────────────────────────
-async function findActiveSessions(courseId) {
-  return Session.find({
-    course: courseId,
-    $expr: {
-      $gt: [
-        { $add: ['$timestamp', { $multiply: ['$duration', 60000] }] },
-        new Date(),
-      ],
-    },
-  }).lean();
+const LECTURE_MATCH_WINDOW_MS = 30 * 60 * 1000; // ±30 min
+const DEFAULT_LECTURE_DURATION_MIN = 55;          // typical class length
+
+// ── Resolve or create a lecture for an ad-hoc session ─────────────────────────
+/**
+ * Finds the best matching lecture in course.lectures for the current time.
+ * If none found within ±30 min, creates a new one on the Course document.
+ *
+ * Returns { lectureUID, scheduledTime, wasCreated }
+ */
+async function resolveOrCreateLecture(course, providedLectureUID) {
+  const now = new Date();
+
+  // 1. If caller explicitly provided a lectureUID, use it
+  if (providedLectureUID) {
+    const lec = course.lectures.find(l => l.lectureUID === providedLectureUID);
+    if (lec) return { lectureUID: lec.lectureUID, scheduledTime: lec.scheduledTime, wasCreated: false };
+    // Provided UID not found — fall through to auto-resolve
+  }
+
+  // 2. Find the closest non-cancelled lecture within the window
+  const window = LECTURE_MATCH_WINDOW_MS;
+  const closest = course.lectures
+    .filter(l => !l.cancelled)
+    .map(l => ({ ...l, diff: Math.abs(new Date(l.scheduledTime) - now) }))
+    .filter(l => l.diff <= window)
+    .sort((a, b) => a.diff - b.diff)[0];
+
+  if (closest) {
+    return { lectureUID: closest.lectureUID, scheduledTime: closest.scheduledTime, wasCreated: false };
+  }
+
+  // 3. No match — create an ad-hoc lecture on the Course document
+  // Round scheduledTime down to the nearest minute for cleanliness
+  const scheduledTime = new Date(Math.floor(now.getTime() / 60000) * 60000);
+  const lectureUID    = uuidv4();
+
+  await Course.updateOne(
+    { _id: course._id },
+    {
+      $push: {
+        lectures: {
+          lectureUID,
+          scheduledTime,
+          cancelled: false,
+        },
+      },
+    }
+  );
+
+  console.log(`[Session] Created ad-hoc lecture ${lectureUID} for course ${course._id} at ${scheduledTime.toISOString()}`);
+  return { lectureUID, scheduledTime, wasCreated: true };
 }
 
 // ── POST /startSession ────────────────────────────────────────────────────────
-// A lecture can have multiple simultaneous sessions (BLE, QR, Manual each separately).
-// Guard: one active session per (course, lectureUID, method).
 router.post('/startSession', authenticate, async (req, res, next) => {
   try {
     const { course_id, mode, lectureUID } = req.body;
@@ -38,56 +91,40 @@ router.post('/startSession', authenticate, async (req, res, next) => {
       || (course.tas || []).includes(uid);
     if (!allowed) return res.status(403).json({ error: 'Forbidden' });
 
-    // Resolve lectureUID
-    let resolvedLectureUID = lectureUID;
-    let scheduledTime      = new Date();
-    const duration         = 50;
+    // Resolve (or create) the lecture this session belongs to
+    const { lectureUID: resolvedUID, scheduledTime, wasCreated } =
+      await resolveOrCreateLecture(course, lectureUID);
 
-    if (!resolvedLectureUID) {
-      const now      = new Date();
-      const upcoming = course.lectures
-        .filter(l => !l.cancelled && new Date(l.scheduledTime) <= now)
-        .sort((a, b) => new Date(b.scheduledTime) - new Date(a.scheduledTime))[0];
-      resolvedLectureUID = upcoming?.lectureUID || uuidv4();
-      if (upcoming) scheduledTime = upcoming.scheduledTime;
-    } else {
-      const lec = course.lectures.find(l => l.lectureUID === resolvedLectureUID);
-      if (lec) scheduledTime = lec.scheduledTime;
-    }
-
-    // Guard: no duplicate active session for same method on this lecture
-    const existingForMethod = await Session.findOne({
+    // Guard: no duplicate active session for same (course, lectureUID, method)
+    const existing = await Session.findOne({
       course:     course_id,
-      lectureUID: resolvedLectureUID,
+      lectureUID: resolvedUID,
       method:     mode,
-      $expr: {
-        $gt: [
-          { $add: ['$timestamp', { $multiply: ['$duration', 60000] }] },
-          new Date(),
-        ],
-      },
+      active:     true,
     }).lean();
 
-    if (existingForMethod) {
+    if (existing) {
       return res.status(409).json({
         error:      `An active ${mode} session already exists for this lecture`,
-        session_id: existingForMethod.sessionUID,
+        session_id: existing.sessionUID,
       });
     }
 
     const session = await Session.create({
       course:          course_id,
-      lectureUID:      resolvedLectureUID,
+      lectureUID:      resolvedUID,
       scheduledTime,
-      duration,
+      duration:        DEFAULT_LECTURE_DURATION_MIN,
       method:          mode,
       isAutoGenerated: false,
+      active:          true,
     });
 
     res.status(201).json({
-      session_id: session.sessionUID,
-      lectureUID: resolvedLectureUID,
-      method:     mode,
+      session_id:   session.sessionUID,
+      lectureUID:   resolvedUID,
+      method:       mode,
+      lectureCreated: wasCreated, // tells the frontend if a new lecture was made
     });
   } catch (err) { next(err); }
 });
@@ -95,27 +132,29 @@ router.post('/startSession', authenticate, async (req, res, next) => {
 // ── POST /endSession/:sessionId ───────────────────────────────────────────────
 router.post('/endSession/:sessionId', authenticate, async (req, res, next) => {
   try {
-    const session = await Session.findOne({ sessionUID: req.params.sessionId });
+    const session = await Session.findOneAndUpdate(
+      { sessionUID: req.params.sessionId },
+      { $set: { active: false, endedAt: new Date() } },
+      { new: true }
+    );
     if (!session) return res.status(404).json({ error: 'Session not found' });
-    const elapsed = Math.ceil((Date.now() - session.timestamp.getTime()) / 60000) || 1;
-    session.duration = elapsed;
-    await session.save();
     res.json({ message: 'Session ended', session_id: session.sessionUID });
   } catch (err) { next(err); }
 });
 
 // ── GET /activeSession?course_id=... ─────────────────────────────────────────
-// Returns ALL active sessions for a course.
-// Primary field for backward-compat + activeSessions[] for multi-session UI.
 router.get('/activeSession', authenticate, async (req, res, next) => {
   try {
     const { course_id } = req.query;
     if (!course_id) return res.status(400).json({ error: 'course_id required' });
 
-    const sessions = await findActiveSessions(course_id);
+    const sessions = await Session.find({ course: course_id, active: true })
+      .sort({ timestamp: -1 })
+      .lean();
+
     if (sessions.length === 0) return res.json({});
 
-    const primary = sessions.sort((a, b) => b.timestamp - a.timestamp)[0];
+    const primary = sessions[0];
     res.json({
       session_id:     primary.sessionUID,
       method:         primary.method,
@@ -136,7 +175,11 @@ router.get('/admin/sessions', authenticate, async (req, res, next) => {
   try {
     if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
     const sessions = await Session.find().sort({ timestamp: -1 }).limit(200).lean();
-    res.json(sessions.map(s => ({ ...s, session_id: s.sessionUID, course_id: s.course })));
+    res.json(sessions.map(s => ({
+      ...s,
+      session_id: s.sessionUID,
+      course_id:  s.course,
+    })));
   } catch (err) { next(err); }
 });
 

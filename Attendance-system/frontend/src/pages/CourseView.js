@@ -3,7 +3,7 @@ import {
   startSession, getQR, getAttendance, endSession, getActiveSession,
   manualAttendanceBulk, getCourseStudents,
   getCourseSchedules, addSchedule as apiAddSchedule,
-  updateSchedule as apiUpdateSchedule, deleteSchedule as apiDeleteSchedule,
+  updateSchedule as apiUpdateSchedule, deleteScheduleItem as apiDeleteSchedule,
 } from "../api/client";
 import { QRCodeCanvas } from "qrcode.react";
 import {

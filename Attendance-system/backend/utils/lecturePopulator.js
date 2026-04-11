@@ -3,21 +3,87 @@ const { v4: uuidv4 } = require('uuid');
 // SLOT → days of week (0=Sun…6=Sat) + time windows
 // These are example VIT-style slot mappings. Adjust to your institution.
 const SLOT_MAP = {
-  A:  [{ day: 1, start: '08:00', end: '08:50' }, { day: 3, start: '08:00', end: '08:50' }, { day: 5, start: '08:00', end: '08:50' }],
-  B:  [{ day: 1, start: '09:00', end: '09:50' }, { day: 3, start: '09:00', end: '09:50' }, { day: 5, start: '09:00', end: '09:50' }],
-  C:  [{ day: 1, start: '10:00', end: '10:50' }, { day: 3, start: '10:00', end: '10:50' }, { day: 5, start: '10:00', end: '10:50' }],
-  D:  [{ day: 1, start: '11:00', end: '11:50' }, { day: 3, start: '11:00', end: '11:50' }, { day: 5, start: '11:00', end: '11:50' }],
-  E:  [{ day: 2, start: '08:00', end: '08:50' }, { day: 4, start: '08:00', end: '08:50' }, { day: 6, start: '08:00', end: '08:50' }],
-  F:  [{ day: 2, start: '09:00', end: '09:50' }, { day: 4, start: '09:00', end: '09:50' }, { day: 6, start: '09:00', end: '09:50' }],
-  G:  [{ day: 2, start: '10:00', end: '10:50' }, { day: 4, start: '10:00', end: '10:50' }, { day: 6, start: '10:00', end: '10:50' }],
-  P:  [{ day: 1, start: '14:00', end: '14:50' }, { day: 3, start: '14:00', end: '14:50' }],
-  Q:  [{ day: 1, start: '15:00', end: '15:50' }, { day: 4, start: '15:00', end: '15:50' }],
-  R:  [{ day: 2, start: '14:00', end: '14:50' }, { day: 5, start: '14:00', end: '14:50' }],
-  S:  [{ day: 2, start: '15:00', end: '15:50' }, { day: 5, start: '15:00', end: '15:50' }],
-  W:  [{ day: 3, start: '15:00', end: '15:50' }, { day: 6, start: '09:00', end: '09:50' }],
-  X:  [{ day: 4, start: '09:00', end: '09:50' }, { day: 6, start: '10:00', end: '10:50' }],
-  Y:  [{ day: 1, start: '16:00', end: '16:50' }, { day: 3, start: '16:00', end: '16:50' }],
-  Z:  [{ day: 2, start: '16:00', end: '16:50' }, { day: 4, start: '16:00', end: '16:50' }],
+  A: [
+    { day: 1, start: '09:00', end: '09:55' },
+    { day: 3, start: '11:00', end: '11:55' },
+    { day: 4, start: '10:00', end: '10:55' }
+  ],
+
+  B: [
+    { day: 1, start: '10:00', end: '10:55' },
+    { day: 3, start: '09:00', end: '09:55' },
+    { day: 4, start: '11:00', end: '11:55' }
+  ],
+
+  C: [
+    { day: 1, start: '11:00', end: '11:55' },
+    { day: 3, start: '10:00', end: '10:55' },
+    { day: 4, start: '09:00', end: '09:55' }
+  ],
+
+  D: [
+    { day: 1, start: '12:00', end: '12:55' },
+    { day: 2, start: '09:00', end: '09:55' },
+    { day: 5, start: '11:00', end: '11:55' }
+  ],
+
+  E: [
+    { day: 2, start: '10:00', end: '10:55' },
+    { day: 4, start: '12:00', end: '12:55' },
+    { day: 5, start: '09:00', end: '09:55' }
+  ],
+
+  F: [
+    { day: 2, start: '11:00', end: '11:55' },
+    { day: 3, start: '14:30', end: '15:55' },
+    { day: 5, start: '10:00', end: '10:55' }
+  ],
+
+  G: [
+    { day: 2, start: '12:00', end: '12:55' },
+    { day: 3, start: '12:00', end: '12:55' },
+    { day: 5, start: '12:00', end: '12:55' }
+  ],
+
+  P: [
+    { day: 1, start: '14:30', end: '15:55' },
+    { day: 4, start: '16:00', end: '17:25' }
+  ],
+
+  Q: [
+    { day: 1, start: '16:00', end: '17:25' },
+    { day: 4, start: '14:30', end: '15:55' }
+  ],
+
+  R: [
+    { day: 2, start: '14:30', end: '15:55' },
+    { day: 5, start: '16:00', end: '17:25' }
+  ],
+
+  S: [
+    { day: 2, start: '16:00', end: '17:25' },
+    { day: 5, start: '14:30', end: '15:55' }
+  ],
+
+  W: [
+    { day: 1, start: '17:30', end: '19:00' },
+    { day: 4, start: '17:30', end: '19:00' }
+  ],
+
+  X: [
+    { day: 1, start: '19:00', end: '20:30' },
+    { day: 4, start: '19:00', end: '20:30' }
+  ],
+
+  Y: [
+    { day: 2, start: '17:30', end: '19:00' },
+    { day: 5, start: '17:30', end: '19:00' }
+  ],
+
+  Z: [
+    { day: 2, start: '19:00', end: '20:30' },
+    { day: 5, start: '19:00', end: '20:30' }
+  ]
 };
 
 const DAY_NAMES = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];

@@ -1,693 +1,662 @@
+/**
+ * AdminCourses.js  (full-page version for admin nav → "Courses")
+ *
+ * Shows all courses with:
+ *  - Enrolled students count, TAs, department, slot
+ *  - Expandable panel per course showing per-student attendance %
+ *  - TA add/remove (student IDs only)
+ *  - Enroll / unenroll students
+ *  - Create / delete courses
+ *  - CSV bulk-create/delete panel
+ */
 import { useState, useEffect, useCallback } from "react";
 import {
-  getAdminCourses, getAdminStudents, getAdminProfessors,
-  createCourse, deleteCourse, updateCourse,
-  adminEnroll, adminEnrollBulk, adminUnenroll,
+  getAllCourses, getAllUsers,
+  createCourse, deleteCourse,
+  enrollStudent, unenrollStudent,
+  getCourseEnrolled,
+  getAdminCourseAnalytics,
   addTA, removeTA,
-  getStudentCourses, getCourseStudents,
-  getCourseAnalytics,
+  csvBulkCreate, csvBulkDelete,
 } from "../api/client";
-import { StudentLectureHistory } from "./Analytics";
 import {
   Plus, Trash2, BookOpen, Users, ChevronDown, ChevronUp,
-  Search, X, RefreshCw, GraduationCap, UserPlus, Eye,
-  AlertTriangle, CheckCircle2,
+  Search, RefreshCw, UserPlus, Upload, X, GraduationCap,
+  AlertTriangle, CheckCircle2, Activity, Shield,
 } from "lucide-react";
 import { Badge, Button, Spinner, Empty, Modal, ProgressBar, AttendancePct } from "../components/UI";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-
 const SLOTS = ["A","B","C","D","E","F","G","P","Q","R","S","W","X","Y","Z"];
-const COURSE_COLORS = ["bg-azure-500","bg-jade-500","bg-violet-500","bg-amber-500","bg-rose-500"];
 
 function fmtDate(d) {
   if (!d) return "—";
   return new Date(d).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
 }
 
-// ── Create Course Modal ───────────────────────────────────────────────────────
+// ── CSV Upload Panel ──────────────────────────────────────────────────────────
+function CsvPanel({ onDone }) {
+  const [mode,   setMode]   = useState("create");
+  const [type,   setType]   = useState("students");
+  const [file,   setFile]   = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [result, setResult] = useState(null);
+  const [err,    setErr]    = useState("");
 
-function CreateCourseModal({ professors, onClose, onCreated }) {
+  const TYPES = ["students","professors","courses","enrollments"];
+  const TEMPLATES = {
+    students:    "_id,name,email,password,imageURL",
+    professors:  "_id,name,email,password,department",
+    courses:     "_id,name,department,slot,venue,startDate,endDate,instructors,tas",
+    enrollments: "student,course",
+  };
+
+  const handleSubmit = async () => {
+    if (!file) { setErr("Please select a CSV file."); return; }
+    setSaving(true); setErr(""); setResult(null);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      fd.append("type", type);
+      const res = mode === "create" ? await csvBulkCreate(fd) : await csvBulkDelete(fd);
+      setResult(res.data);
+      setFile(null);
+      onDone();
+    } catch (e) {
+      setErr(e.response?.data?.error || "CSV operation failed.");
+    } finally { setSaving(false); }
+  };
+
+  return (
+    <div className="bg-card border border-edge rounded-2xl p-5 space-y-4">
+      <div className="flex items-center gap-2">
+        <Upload size={15} className="text-violet-400" />
+        <h3 className="text-snow font-semibold text-sm">CSV Bulk Operations</h3>
+      </div>
+
+      <div className="flex gap-1 p-1 bg-ink rounded-xl border border-edge w-fit">
+        {["create","delete"].map(m => (
+          <button key={m} onClick={() => { setMode(m); setResult(null); setErr(""); }}
+            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+              mode === m
+                ? m === "delete"
+                  ? "bg-rose-500/20 text-rose-400 border border-rose-500/30"
+                  : "bg-azure-500/20 text-azure-400 border border-azure-500/30"
+                : "text-soft hover:text-snow"
+            }`}>
+            {m === "create" ? "Bulk Create" : "Bulk Delete"}
+          </button>
+        ))}
+      </div>
+
+      <div className="flex flex-wrap gap-1.5">
+        {TYPES.map(t => (
+          <button key={t} onClick={() => setType(t)}
+            className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
+              type === t
+                ? "bg-violet-500/15 text-violet-400 border-violet-500/30"
+                : "bg-ink text-soft border-edge hover:text-snow"
+            }`}>{t}</button>
+        ))}
+      </div>
+
+      <div className="bg-ink border border-edge rounded-xl px-4 py-2.5">
+        <p className="text-dim text-xs font-mono">{TEMPLATES[type]}</p>
+        {type === "courses" && (
+          <p className="text-dim text-xs mt-1">instructors/tas = comma-separated student IDs within the cell</p>
+        )}
+        {mode === "delete" && type !== "enrollments" && (
+          <p className="text-dim text-xs mt-1">Only _id column needed for delete.</p>
+        )}
+      </div>
+
+      <label className="flex items-center gap-3 px-4 py-3 bg-ink border border-edge border-dashed rounded-xl cursor-pointer hover:border-violet-500/40 transition-colors">
+        <Upload size={16} className="text-dim shrink-0" />
+        <span className="text-soft text-sm flex-1 truncate">
+          {file ? file.name : "Click to select CSV file…"}
+        </span>
+        {file && (
+          <button onClick={e => { e.preventDefault(); setFile(null); }}
+            className="text-dim hover:text-rose-400 transition-colors">
+            <X size={14} />
+          </button>
+        )}
+        <input type="file" accept=".csv,text/csv" className="hidden"
+          onChange={e => { setFile(e.target.files[0] || null); setResult(null); setErr(""); }} />
+      </label>
+
+      {err && <p className="text-rose-400 text-xs">{err}</p>}
+      {result && (
+        <div className="flex items-start gap-2 bg-jade-500/10 border border-jade-500/20 rounded-xl px-4 py-3">
+          <CheckCircle2 size={14} className="text-jade-400 shrink-0 mt-0.5" />
+          <div className="text-xs text-jade-300">
+            {mode === "create"
+              ? `Created: ${result.created ?? 0}  Skipped: ${result.skipped ?? 0}`
+              : `Deleted: ${result.deleted ?? 0}`}
+            {result.errors?.length > 0 && (
+              <p className="text-amber-400 mt-1">Errors: {result.errors.slice(0,5).join("; ")}</p>
+            )}
+          </div>
+        </div>
+      )}
+      <Button onClick={handleSubmit} loading={saving} variant={mode === "delete" ? "danger" : "primary"}>
+        {mode === "create" ? <><Upload size={14} /> Upload & Create</> : <><Trash2 size={14} /> Upload & Delete</>}
+      </Button>
+    </div>
+  );
+}
+
+// ── TA Management ─────────────────────────────────────────────────────────────
+function TaPanel({ courseId, currentTas, allStudents, onRefresh }) {
+  const [newTaId,  setNewTaId]  = useState("");
+  const [adding,   setAdding]   = useState(false);
+  const [removing, setRemoving] = useState(null);
+  const [err,      setErr]      = useState("");
+
+  const studentMap = Object.fromEntries((allStudents || []).map(s => [s._id || s.id, s.name]));
+
+  const handleAdd = async () => {
+    if (!newTaId.trim()) return setErr("Enter a student ID");
+    setAdding(true); setErr("");
+    try {
+      await addTA(courseId, newTaId.trim());
+      setNewTaId(""); onRefresh();
+    } catch (e) {
+      setErr(e.response?.data?.error || "Failed to add TA");
+    } finally { setAdding(false); }
+  };
+
+  const handleRemove = async (studentId) => {
+    setRemoving(studentId);
+    try {
+      await removeTA(courseId, studentId);
+      onRefresh();
+    } catch {} finally { setRemoving(null); }
+  };
+
+  return (
+    <div className="space-y-2">
+      <p className="text-soft text-xs font-medium uppercase tracking-wider">Teaching Assistants</p>
+      {(currentTas || []).length === 0 ? (
+        <p className="text-dim text-xs">No TAs assigned.</p>
+      ) : (
+        <div className="space-y-1">
+          {currentTas.map(taId => (
+            <div key={taId} className="flex items-center gap-2">
+              <div className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" />
+              <span className="text-amber-400 text-xs font-mono flex-1">
+                {taId}{studentMap[taId] ? ` — ${studentMap[taId]}` : ""}
+              </span>
+              <button onClick={() => handleRemove(taId)} disabled={removing === taId}
+                className="text-dim hover:text-rose-400 transition-colors">
+                {removing === taId ? <Spinner size={11} /> : <X size={12} />}
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="flex gap-2 mt-2">
+        <input value={newTaId} onChange={e => setNewTaId(e.target.value)}
+          placeholder="Student ID to add as TA"
+          onKeyDown={e => e.key === "Enter" && handleAdd()}
+          className="flex-1 bg-card border border-edge rounded-xl text-xs text-snow px-3 py-1.5
+            focus:outline-none focus:border-amber-500 placeholder:text-dim transition-all" />
+        <button onClick={handleAdd} disabled={adding}
+          className="px-3 py-1.5 rounded-xl bg-amber-500/15 text-amber-400 text-xs border border-amber-500/20
+            hover:bg-amber-500/25 transition-colors disabled:opacity-50 flex items-center gap-1">
+          {adding ? <Spinner size={11} /> : <UserPlus size={12} />} Add TA
+        </button>
+      </div>
+      {err && <p className="text-rose-400 text-xs">{err}</p>}
+    </div>
+  );
+}
+
+// ── Student Stats Panel ───────────────────────────────────────────────────────
+function CourseStudentStats({ courseId }) {
+  const [data,    setData]    = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [query,   setQuery]   = useState("");
+
+  useEffect(() => {
+    getAdminCourseAnalytics(courseId)
+      .then(r => setData(r.data))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [courseId]);
+
+  if (loading) return <div className="flex justify-center py-4"><Spinner size={16} /></div>;
+  if (!data)   return <p className="text-dim text-xs py-2">Could not load student stats.</p>;
+
+  const filtered = (data.studentStats || []).filter(s =>
+    s.name.toLowerCase().includes(query.toLowerCase()) ||
+    String(s.student_id).toLowerCase().includes(query.toLowerCase())
+  );
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <p className="text-soft text-xs font-medium uppercase tracking-wider">
+          Enrolled Students
+          <span className="ml-1.5 text-dim normal-case font-mono">
+            ({data.enrolled} enrolled · {data.totalLectures} lectures held)
+          </span>
+        </p>
+        <div className="relative">
+          <Search size={11} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-dim" />
+          <input value={query} onChange={e => setQuery(e.target.value)}
+            placeholder="Search…"
+            className="bg-card border border-edge rounded-lg text-xs text-snow pl-7 pr-2.5 py-1
+              focus:outline-none focus:border-azure-500 transition-all w-36 placeholder:text-dim" />
+        </div>
+      </div>
+
+      {filtered.length === 0 ? (
+        <p className="text-dim text-xs py-2 text-center">No students found.</p>
+      ) : (
+        <div className="space-y-1 max-h-52 overflow-y-auto">
+          {filtered.map(s => (
+            <div key={s.student_id} className="flex items-center gap-2 py-1.5 px-2 rounded-lg hover:bg-white/2">
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-1.5">
+                  <p className="text-snow text-xs font-medium truncate">{s.name}</p>
+                  {s.isTA && (
+                    <span className="px-1.5 py-0.5 rounded text-xs bg-amber-500/15 text-amber-400 border border-amber-500/20 font-mono shrink-0">TA</span>
+                  )}
+                </div>
+                <p className="text-dim text-xs font-mono">{s.student_id}</p>
+              </div>
+              <div className="w-20 shrink-0">
+                <ProgressBar value={s.attendancePct} max={100} size="sm" />
+              </div>
+              <AttendancePct value={s.attendancePct} small />
+              <span className="text-dim text-xs font-mono w-16 text-right shrink-0">
+                {s.attended}/{s.totalLectures}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Create Course Form ────────────────────────────────────────────────────────
+function CreateCourseForm({ professors, onCreated, onCancel }) {
   const [form, setForm] = useState({
-    name: "", _id: "", slot: "A", classroom: "",
+    name: "", _id: "", slot: "A",
+    department: "CSE", venue: "",
     startDate: "", endDate: "",
-    instructors: [], tas: [],
+    instructors: [], tas: "",
   });
   const [saving, setSaving] = useState(false);
   const [err,    setErr]    = useState("");
 
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
 
-  const toggleProf = (id, field) => {
-    setForm(f => {
-      const arr = f[field].includes(id)
-        ? f[field].filter(x => x !== id)
-        : [...f[field], id];
-      return { ...f, [field]: arr };
-    });
+  const toggleInstructor = (id) => {
+    setForm(f => ({
+      ...f,
+      instructors: f.instructors.includes(id)
+        ? f.instructors.filter(x => x !== id)
+        : [...f.instructors, id],
+    }));
   };
 
   const handleSave = async () => {
-    if (!form.name.trim()) { setErr("Course name is required."); return; }
-    if (!form.startDate || !form.endDate) { setErr("Start and end dates are required."); return; }
-    if (form.instructors.length === 0) { setErr("At least one instructor is required."); return; }
-    setSaving(true);
-    setErr("");
+    if (!form.name.trim())        { setErr("Course name required."); return; }
+    if (!form.department.trim())  { setErr("Department required."); return; }
+    if (!form.venue.trim())       { setErr("Venue required."); return; }
+    if (!form.startDate || !form.endDate) { setErr("Start and end dates required."); return; }
+    if (form.instructors.length === 0)    { setErr("At least one instructor required."); return; }
+    setSaving(true); setErr("");
     try {
-      const payload = { ...form };
-      if (!payload._id.trim()) delete payload._id;
+      const payload = {
+        ...form,
+        _id:  form._id.trim() || undefined,
+        tas:  form.tas ? form.tas.split(",").map(s => s.trim()).filter(Boolean) : [],
+      };
+      if (!payload._id) delete payload._id;
       const res = await createCourse(payload);
       onCreated(res.data);
-      onClose();
     } catch (e) {
       setErr(e.response?.data?.error || "Failed to create course.");
-    } finally {
-      setSaving(false);
-    }
+    } finally { setSaving(false); }
   };
 
   return (
-    <Modal title="Create New Course" onClose={onClose} maxWidth="max-w-xl">
-      <div className="p-5 space-y-4">
-        {err && (
-          <div className="flex items-center gap-2 bg-rose-500/10 border border-rose-500/20 rounded-xl px-4 py-3">
-            <AlertTriangle size={13} className="text-rose-400 shrink-0" />
-            <p className="text-rose-300 text-xs">{err}</p>
-          </div>
-        )}
-
-        <div className="grid grid-cols-2 gap-3">
-          <div className="col-span-2 space-y-1.5">
-            <label className="text-xs text-soft font-medium">Course Name *</label>
-            <input value={form.name} onChange={e => set("name", e.target.value)}
-              placeholder="e.g. Data Structures and Algorithms"
-              className="w-full bg-ink border border-edge rounded-xl text-sm text-snow placeholder:text-dim
-                focus:outline-none focus:border-azure-500 transition-all px-4 py-2.5" />
-          </div>
-
-          <div className="space-y-1.5">
-            <label className="text-xs text-soft font-medium">Course ID (optional)</label>
-            <input value={form._id} onChange={e => set("_id", e.target.value)}
-              placeholder="Auto-generated if blank"
-              className="w-full bg-ink border border-edge rounded-xl text-sm text-snow placeholder:text-dim
-                focus:outline-none focus:border-azure-500 transition-all px-4 py-2.5 font-mono" />
-          </div>
-
-          <div className="space-y-1.5">
-            <label className="text-xs text-soft font-medium">Slot *</label>
-            <select value={form.slot} onChange={e => set("slot", e.target.value)}
-              className="w-full bg-ink border border-edge rounded-xl text-sm text-snow px-4 py-2.5
-                focus:outline-none focus:border-azure-500 transition-all appearance-none">
-              {SLOTS.map(s => <option key={s} value={s}>{s}</option>)}
-            </select>
-          </div>
-
-          <div className="space-y-1.5">
-            <label className="text-xs text-soft font-medium">Start Date *</label>
-            <input type="date" value={form.startDate} onChange={e => set("startDate", e.target.value)}
-              className="w-full bg-ink border border-edge rounded-xl text-sm text-snow px-4 py-2.5
-                focus:outline-none focus:border-azure-500 transition-all" />
-          </div>
-
-          <div className="space-y-1.5">
-            <label className="text-xs text-soft font-medium">End Date *</label>
-            <input type="date" value={form.endDate} onChange={e => set("endDate", e.target.value)}
-              className="w-full bg-ink border border-edge rounded-xl text-sm text-snow px-4 py-2.5
-                focus:outline-none focus:border-azure-500 transition-all" />
-          </div>
-
-          <div className="space-y-1.5">
-            <label className="text-xs text-soft font-medium">Classroom</label>
-            <input value={form.classroom} onChange={e => set("classroom", e.target.value)}
-              placeholder="e.g. LH-1"
-              className="w-full bg-ink border border-edge rounded-xl text-sm text-snow placeholder:text-dim
-                focus:outline-none focus:border-azure-500 transition-all px-4 py-2.5" />
-          </div>
+    <div className="border border-azure-500/20 rounded-xl p-4 bg-ink space-y-3 animate-slide-up">
+      <p className="text-snow text-xs font-semibold">Create New Course</p>
+      {err && (
+        <div className="flex items-center gap-2 bg-rose-500/10 border border-rose-500/20 rounded-lg px-3 py-2">
+          <AlertTriangle size={12} className="text-rose-400 shrink-0" />
+          <p className="text-rose-300 text-xs">{err}</p>
         </div>
-
-        {/* Instructor picker */}
-        <div className="space-y-2">
-          <label className="text-xs text-soft font-medium">Instructors * <span className="text-dim">(select one or more)</span></label>
-          <div className="max-h-40 overflow-y-auto divide-y divide-edge border border-edge rounded-xl">
-            {professors.map(p => (
-              <label key={p._id} className="flex items-center gap-3 px-4 py-2.5 hover:bg-white/2 cursor-pointer">
-                <input type="checkbox"
-                  checked={form.instructors.includes(String(p._id))}
-                  onChange={() => toggleProf(String(p._id), "instructors")}
-                  className="accent-blue-500" />
-                <div className="flex-1 min-w-0">
-                  <p className="text-snow text-xs font-medium">{p.name}</p>
-                  <p className="text-dim text-xs font-mono truncate">{p.email}</p>
-                </div>
-              </label>
-            ))}
-            {professors.length === 0 && (
-              <p className="text-soft text-xs text-center py-4">No professors found.</p>
-            )}
-          </div>
-        </div>
-
-        {/* TA picker */}
-        <div className="space-y-2">
-          <label className="text-xs text-soft font-medium">Teaching Assistants <span className="text-dim">(optional)</span></label>
-          <div className="max-h-32 overflow-y-auto divide-y divide-edge border border-edge rounded-xl">
-            {professors.filter(p => !form.instructors.includes(String(p._id))).map(p => (
-              <label key={p._id} className="flex items-center gap-3 px-4 py-2.5 hover:bg-white/2 cursor-pointer">
-                <input type="checkbox"
-                  checked={form.tas.includes(String(p._id))}
-                  onChange={() => toggleProf(String(p._id), "tas")}
-                  className="accent-violet-500" />
-                <div className="flex-1 min-w-0">
-                  <p className="text-snow text-xs font-medium">{p.name}</p>
-                  <p className="text-dim text-xs font-mono truncate">{p.email}</p>
-                </div>
-              </label>
-            ))}
-            {professors.filter(p => !form.instructors.includes(String(p._id))).length === 0 && (
-              <p className="text-soft text-xs text-center py-4">Assign instructors first to see TA candidates.</p>
-            )}
-          </div>
-        </div>
-
-        <div className="flex gap-2 pt-2">
-          <Button onClick={handleSave} loading={saving}>
-            <CheckCircle2 size={14} /> Create Course
-          </Button>
-          <Button variant="secondary" onClick={onClose}>Cancel</Button>
-        </div>
-      </div>
-    </Modal>
-  );
-}
-
-// ── Enroll Students Modal ─────────────────────────────────────────────────────
-
-function EnrollStudentsModal({ course, allStudents, onClose, onEnrolled }) {
-  const [enrolled,  setEnrolled]  = useState(new Set());
-  const [selected,  setSelected]  = useState(new Set());
-  const [query,     setQuery]     = useState("");
-  const [loading,   setLoading]   = useState(true);
-  const [saving,    setSaving]    = useState(false);
-  const [err,       setErr]       = useState("");
-
-  useEffect(() => {
-    getCourseStudents(course.id || course._id)
-      .then(r => {
-        setEnrolled(new Set(r.data.map(s => String(s.id || s._id))));
-      })
-      .catch(() => {})
-      .finally(() => setLoading(false));
-  }, [course]);
-
-  const filtered = allStudents.filter(s =>
-    s.name.toLowerCase().includes(query.toLowerCase()) ||
-    String(s._id).toLowerCase().includes(query.toLowerCase()) ||
-    (s.email || "").toLowerCase().includes(query.toLowerCase())
-  );
-
-  const handleEnroll = async () => {
-    if (selected.size === 0) return;
-    setSaving(true);
-    setErr("");
-    try {
-      await adminEnrollBulk({
-        studentIds: Array.from(selected),
-        course:     course.id || course._id,
-      });
-      setEnrolled(e => new Set([...e, ...selected]));
-      setSelected(new Set());
-      onEnrolled();
-    } catch (e) {
-      setErr(e.response?.data?.error || "Failed to enroll.");
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const handleUnenroll = async (studentId) => {
-    try {
-      await adminUnenroll({ student: studentId, course: course.id || course._id });
-      setEnrolled(e => { const s = new Set(e); s.delete(String(studentId)); return s; });
-      onEnrolled();
-    } catch {}
-  };
-
-  return (
-    <Modal title={`Enroll Students`} subtitle={course.name} onClose={onClose} maxWidth="max-w-lg">
-      <div className="p-5 space-y-4">
-        {err && <p className="text-rose-400 text-xs">{err}</p>}
-
-        {/* Search */}
-        <div className="relative">
-          <Search size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-dim" />
-          <input value={query} onChange={e => setQuery(e.target.value)}
-            placeholder="Search students…"
-            className="w-full bg-ink border border-edge rounded-xl text-sm text-snow placeholder:text-dim
-              focus:outline-none focus:border-azure-500 transition-all pl-10 pr-4 py-2.5" />
-        </div>
-
-        {loading ? (
-          <div className="flex justify-center py-8"><Spinner /></div>
-        ) : (
-          <div className="divide-y divide-edge border border-edge rounded-xl max-h-72 overflow-y-auto">
-            {filtered.length === 0 ? (
-              <p className="text-soft text-xs text-center py-6">No students found.</p>
-            ) : filtered.map(s => {
-              const id       = String(s._id);
-              const isEnrolled = enrolled.has(id);
-              const isSelected = selected.has(id);
-              return (
-                <div key={id} className="flex items-center gap-3 px-4 py-3 hover:bg-white/2 transition-colors">
-                  {!isEnrolled && (
-                    <input type="checkbox" checked={isSelected}
-                      onChange={() => {
-                        setSelected(sel => {
-                          const n = new Set(sel);
-                          n.has(id) ? n.delete(id) : n.add(id);
-                          return n;
-                        });
-                      }}
-                      className="accent-blue-500 shrink-0" />
-                  )}
-                  {isEnrolled && <CheckCircle2 size={14} className="text-jade-400 shrink-0" />}
-                  <div className="flex-1 min-w-0">
-                    <p className="text-snow text-xs font-medium">{s.name}</p>
-                    <p className="text-dim text-xs font-mono truncate">{s._id}</p>
-                  </div>
-                  {isEnrolled ? (
-                    <button onClick={() => handleUnenroll(id)}
-                      className="text-dim hover:text-rose-400 transition-colors text-xs px-2 py-1 rounded-lg hover:bg-rose-500/10">
-                      Remove
-                    </button>
-                  ) : (
-                    <span className="text-dim text-xs">Not enrolled</span>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        )}
-
-        {selected.size > 0 && (
-          <Button onClick={handleEnroll} loading={saving}>
-            <UserPlus size={14} /> Enroll {selected.size} Student{selected.size !== 1 ? "s" : ""}
-          </Button>
-        )}
-      </div>
-    </Modal>
-  );
-}
-
-// ── Course Analytics Modal (per-student view for admin) ───────────────────────
-
-function CourseAnalyticsModal({ course, allStudents, onClose }) {
-  const [data,     setData]     = useState(null);
-  const [loading,  setLoading]  = useState(true);
-  const [err,      setErr]      = useState(null);
-  const [query,    setQuery]    = useState("");
-  const [viewStudent, setViewStudent] = useState(null); // { studentId, studentName }
-
-  useEffect(() => {
-    getCourseAnalytics(course.id || course._id)
-      .then(r => setData(r.data))
-      .catch(() => setErr("Could not load analytics."))
-      .finally(() => setLoading(false));
-  }, [course]);
-
-  const studentMap = Object.fromEntries(allStudents.map(s => [String(s._id), s]));
-
-  const filtered = (data?.studentStats || []).filter(s =>
-    (s.name || "").toLowerCase().includes(query.toLowerCase()) ||
-    String(s.student_id).toLowerCase().includes(query.toLowerCase())
-  );
-
-  return (
-    <>
-      <Modal title={`Course Analytics`} subtitle={`${course.name} · ${data?.totalLectures ?? "—"} lectures`} onClose={onClose} maxWidth="max-w-lg">
-        <div className="p-5 space-y-4">
-          {/* Summary strip */}
-          {data && (
-            <div className="grid grid-cols-3 gap-3">
-              {[
-                { label: "Lectures",  value: data.totalLectures },
-                { label: "Enrolled",  value: data.enrolled      },
-                { label: "Avg Rate",  value: data.studentStats?.length
-                    ? `${(data.studentStats.reduce((s,x) => s + x.percentage, 0) / data.studentStats.length).toFixed(1)}%`
-                    : "—" },
-              ].map((s, i) => (
-                <div key={i} className="bg-ink border border-edge rounded-xl p-3 text-center">
-                  <p className="text-soft text-xs uppercase tracking-widest mb-0.5">{s.label}</p>
-                  <p className="text-snow text-lg font-bold">{s.value}</p>
-                </div>
-              ))}
-            </div>
-          )}
-
-          {loading ? (
-            <div className="flex justify-center py-8"><Spinner /></div>
-          ) : err ? (
-            <p className="text-rose-400 text-sm text-center">{err}</p>
-          ) : (
-            <>
-              <div className="relative">
-                <Search size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-dim" />
-                <input value={query} onChange={e => setQuery(e.target.value)}
-                  placeholder="Search students…"
-                  className="w-full bg-ink border border-edge rounded-xl text-sm text-snow placeholder:text-dim
-                    focus:outline-none focus:border-azure-500 transition-all pl-10 pr-4 py-2.5" />
-              </div>
-
-              <div className="divide-y divide-edge border border-edge rounded-xl max-h-80 overflow-y-auto">
-                {filtered.length === 0 ? (
-                  <p className="text-soft text-xs text-center py-6">No students found.</p>
-                ) : filtered.map((s, i) => (
-                  <div key={i} className="flex items-center gap-3 px-4 py-3 hover:bg-white/2 transition-colors">
-                    <div className="w-7 h-7 rounded-lg bg-azure-500/15 flex items-center justify-center shrink-0">
-                      <span className="text-azure-400 text-xs font-bold">
-                        {(s.name || "?").charAt(0).toUpperCase()}
-                      </span>
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-snow text-xs font-medium">{s.name}</p>
-                      <p className="text-dim text-xs font-mono">{s.attended}/{s.total} lectures</p>
-                    </div>
-                    <div className="flex items-center gap-3 shrink-0">
-                      <div className="w-16">
-                        <ProgressBar value={s.percentage} max={100} />
-                      </div>
-                      <AttendancePct value={s.percentage} small />
-                      <button
-                        onClick={() => setViewStudent({ studentId: s.student_id, studentName: s.name })}
-                        className="text-xs text-azure-400 hover:text-azure-300 transition-colors px-2 py-1 rounded-lg bg-azure-500/10 border border-azure-500/20"
-                      >
-                        View
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </>
-          )}
-        </div>
-      </Modal>
-
-      {viewStudent && (
-        <StudentLectureHistory
-          studentId={viewStudent.studentId}
-          studentName={viewStudent.studentName}
-          courseId={course.id || course._id}
-          courseName={course.name}
-          onClose={() => setViewStudent(null)}
-        />
       )}
-    </>
-  );
-}
-
-// ── Manage TAs Modal ──────────────────────────────────────────────────────────
-
-function ManageTAsModal({ course, professors, onClose, onUpdated }) {
-  const [currentTAs, setCurrentTAs] = useState(
-    (course.tas || []).map(String)
-  );
-  const [saving, setSaving] = useState(null);
-
-  const handleToggle = async (profId) => {
-    setSaving(profId);
-    try {
-      const isTA = currentTAs.includes(profId);
-      if (isTA) {
-        await removeTA(course.id || course._id, profId);
-        setCurrentTAs(t => t.filter(x => x !== profId));
-      } else {
-        await addTA(course.id || course._id, profId);
-        setCurrentTAs(t => [...t, profId]);
-      }
-      onUpdated();
-    } catch {}
-    finally { setSaving(null); }
-  };
-
-  // Instructors can't be TAs
-  const instructorIds = (course.instructors || []).map(String);
-  const candidates = professors.filter(p => !instructorIds.includes(String(p._id)));
-
-  return (
-    <Modal title="Manage TAs" subtitle={course.name} onClose={onClose}>
-      <div className="p-5 space-y-3">
-        <p className="text-soft text-xs">TAs get read/write access to sessions and schedules for this course.</p>
-        <div className="divide-y divide-edge border border-edge rounded-xl max-h-80 overflow-y-auto">
-          {candidates.length === 0 ? (
-            <p className="text-soft text-xs text-center py-6">No eligible professors.</p>
-          ) : candidates.map(p => {
-            const pid  = String(p._id);
-            const isTA = currentTAs.includes(pid);
-            return (
-              <div key={pid} className="flex items-center gap-3 px-4 py-3 hover:bg-white/2 transition-colors">
-                <div className="flex-1 min-w-0">
-                  <p className="text-snow text-xs font-medium">{p.name}</p>
-                  <p className="text-dim text-xs font-mono truncate">{p.email}</p>
-                </div>
-                <button
-                  onClick={() => handleToggle(pid)}
-                  disabled={saving === pid}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors border ${
-                    isTA
-                      ? "bg-violet-500/15 text-violet-400 border-violet-500/20 hover:bg-rose-500/15 hover:text-rose-400 hover:border-rose-500/20"
-                      : "bg-jade-500/15 text-jade-400 border-jade-500/20 hover:bg-jade-500/25"
-                  } disabled:opacity-40`}
-                >
-                  {saving === pid ? <Spinner size={12} /> : isTA ? "Remove TA" : "Add as TA"}
-                </button>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-    </Modal>
-  );
-}
-
-// ── Course Row ────────────────────────────────────────────────────────────────
-
-function CourseRow({ course, professors, allStudents, colorIdx, onDelete, onRefresh }) {
-  const [open,       setOpen]       = useState(false);
-  const [modal,      setModal]      = useState(null); // "enroll" | "analytics" | "tas"
-  const [deleting,   setDeleting]   = useState(false);
-
-  const profMap = Object.fromEntries(professors.map(p => [String(p._id), p]));
-
-  const instructorNames = (course.instructors || [])
-    .map(id => profMap[String(id)]?.name || String(id));
-  const taNames = (course.tas || [])
-    .map(id => profMap[String(id)]?.name || String(id));
-
-  const handleDelete = async () => {
-    if (!window.confirm(`Delete course "${course.name}"? This cannot be undone.`)) return;
-    setDeleting(true);
-    try {
-      await deleteCourse(course.id || course._id);
-      onDelete(course.id || course._id);
-    } catch {
-      setDeleting(false);
-    }
-  };
-
-  return (
-    <>
-      <div className="bg-card border border-edge rounded-2xl overflow-hidden animate-slide-up">
-        {/* Colour bar */}
-        <div className={`h-1 ${COURSE_COLORS[colorIdx % COURSE_COLORS.length]}`} />
-
-        <div className="px-5 py-4">
-          <div className="flex items-start justify-between gap-4">
-            <div className="flex-1 min-w-0">
-              <div className="flex items-center gap-2 flex-wrap">
-                <h3 className="text-snow font-semibold text-sm">{course.name}</h3>
-                <Badge label={`Slot ${course.slot || "—"}`} variant="default" />
-                {taNames.length > 0 && <Badge label={`${taNames.length} TA`} variant="ta" />}
-              </div>
-              <p className="text-soft text-xs font-mono mt-0.5">
-                ID: {course.id || course._id} · {course.enrolled ?? "—"} enrolled
-              </p>
-              <p className="text-dim text-xs mt-1">
-                {fmtDate(course.startDate)} → {fmtDate(course.endDate)}
-              </p>
-            </div>
-
-            <div className="flex items-center gap-2 shrink-0">
-              <Button size="xs" variant="secondary" onClick={() => setModal("analytics")}>
-                <Eye size={12} /> Analytics
-              </Button>
-              <Button size="xs" variant="jade" onClick={() => setModal("enroll")}>
-                <UserPlus size={12} /> Enroll
-              </Button>
-              <Button size="xs" variant="violet" onClick={() => setModal("tas")}>
-                <GraduationCap size={12} /> TAs
-              </Button>
-              <button onClick={handleDelete} disabled={deleting}
-                className="text-dim hover:text-rose-400 transition-colors disabled:opacity-40 p-1.5 rounded-lg hover:bg-rose-500/10">
-                {deleting ? <Spinner size={13} /> : <Trash2 size={13} />}
-              </button>
-              <button onClick={() => setOpen(o => !o)}
-                className="text-dim hover:text-snow transition-colors p-1.5 rounded-lg hover:bg-white/5">
-                {open ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-              </button>
-            </div>
+      <div className="grid grid-cols-2 gap-2">
+        {[
+          ["Course Name *", "name", "text", "Data Structures"],
+          ["Course ID (optional)", "_id", "text", "CS3101"],
+          ["Department *", "department", "text", "CSE"],
+          ["Venue *", "venue", "text", "LH-1"],
+        ].map(([lbl, key, type, placeholder]) => (
+          <div key={key} className="space-y-1">
+            <label className="text-xs text-soft">{lbl}</label>
+            <input type={type} value={form[key]} placeholder={placeholder}
+              onChange={e => set(key, e.target.value)}
+              className="w-full bg-card border border-edge rounded-xl text-xs text-snow px-3 py-1.5
+                focus:outline-none focus:border-azure-500 transition-all placeholder:text-dim" />
           </div>
-
-          {/* Expanded details */}
-          {open && (
-            <div className="mt-4 pt-4 border-t border-edge space-y-2">
-              <div className="flex flex-wrap gap-4 text-xs">
-                <div>
-                  <p className="text-soft uppercase tracking-widest mb-1">Instructors</p>
-                  {instructorNames.length ? instructorNames.map((n, i) => (
-                    <p key={i} className="text-snow font-medium">{n}</p>
-                  )) : <p className="text-dim">None assigned</p>}
-                </div>
-                {taNames.length > 0 && (
-                  <div>
-                    <p className="text-soft uppercase tracking-widest mb-1">TAs</p>
-                    {taNames.map((n, i) => (
-                      <p key={i} className="text-violet-400 font-medium">{n}</p>
-                    ))}
-                  </div>
-                )}
-                {course.classroom && (
-                  <div>
-                    <p className="text-soft uppercase tracking-widest mb-1">Classroom</p>
-                    <p className="text-snow font-medium">{course.classroom}</p>
-                  </div>
-                )}
-                <div>
-                  <p className="text-soft uppercase tracking-widest mb-1">Lectures</p>
-                  <p className="text-snow font-medium font-mono">{course.lectures?.length ?? "—"}</p>
-                </div>
-              </div>
-            </div>
-          )}
+        ))}
+        <div className="space-y-1">
+          <label className="text-xs text-soft">Start Date *</label>
+          <input type="date" value={form.startDate} onChange={e => set("startDate", e.target.value)}
+            className="w-full bg-card border border-edge rounded-xl text-xs text-snow px-3 py-1.5
+              focus:outline-none focus:border-azure-500 transition-all" />
+        </div>
+        <div className="space-y-1">
+          <label className="text-xs text-soft">End Date *</label>
+          <input type="date" value={form.endDate} onChange={e => set("endDate", e.target.value)}
+            className="w-full bg-card border border-edge rounded-xl text-xs text-snow px-3 py-1.5
+              focus:outline-none focus:border-azure-500 transition-all" />
+        </div>
+        <div className="space-y-1">
+          <label className="text-xs text-soft">Slot</label>
+          <select value={form.slot} onChange={e => set("slot", e.target.value)}
+            className="w-full bg-card border border-edge rounded-xl text-xs text-snow px-3 py-1.5
+              focus:outline-none focus:border-azure-500 transition-all appearance-none">
+            {SLOTS.map(s => <option key={s} value={s}>{s}</option>)}
+          </select>
+        </div>
+        <div className="col-span-2 space-y-1">
+          <label className="text-xs text-soft">TA Student IDs (comma-separated)</label>
+          <input type="text" value={form.tas} placeholder="CS22B0001,CS22B0002"
+            onChange={e => set("tas", e.target.value)}
+            className="w-full bg-card border border-edge rounded-xl text-xs text-snow px-3 py-1.5
+              focus:outline-none focus:border-azure-500 transition-all placeholder:text-dim" />
         </div>
       </div>
 
-      {modal === "enroll" && (
-        <EnrollStudentsModal
-          course={course}
-          allStudents={allStudents}
-          onClose={() => setModal(null)}
-          onEnrolled={onRefresh}
-        />
-      )}
-      {modal === "analytics" && (
-        <CourseAnalyticsModal
-          course={course}
-          allStudents={allStudents}
-          onClose={() => setModal(null)}
-        />
-      )}
-      {modal === "tas" && (
-        <ManageTAsModal
-          course={course}
-          professors={professors}
-          onClose={() => setModal(null)}
-          onUpdated={onRefresh}
-        />
-      )}
-    </>
+      {/* Instructors */}
+      <div className="space-y-1.5">
+        <label className="text-xs text-soft">Instructors * (select one or more)</label>
+        <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto">
+          {professors.map(p => (
+            <button key={p._id || p.id} type="button"
+              onClick={() => toggleInstructor(p._id || p.id)}
+              className={`px-2.5 py-1 rounded-lg text-xs border transition-colors ${
+                form.instructors.includes(p._id || p.id)
+                  ? "bg-violet-500/20 text-violet-400 border-violet-500/30"
+                  : "bg-card text-soft border-edge hover:text-snow"
+              }`}>
+              {p.name}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="flex gap-2">
+        <button onClick={handleSave} disabled={saving}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-azure-500/15 text-azure-400 text-xs
+            border border-azure-500/20 hover:bg-azure-500/25 transition-colors disabled:opacity-50">
+          {saving ? <Spinner size={12} /> : <Plus size={12} />}
+          {saving ? "Creating…" : "Create Course"}
+        </button>
+        <button onClick={onCancel}
+          className="px-3 py-1.5 rounded-xl bg-edge text-soft text-xs hover:text-snow transition-colors">
+          Cancel
+        </button>
+      </div>
+    </div>
   );
 }
 
 // ── Main page ─────────────────────────────────────────────────────────────────
-
 export default function AdminCourses() {
-  const [courses,    setCourses]    = useState([]);
-  const [professors, setProfessors] = useState([]);
-  const [students,   setStudents]   = useState([]);
-  const [loading,    setLoading]    = useState(true);
-  const [query,      setQuery]      = useState("");
-  const [showCreate, setShowCreate] = useState(false);
+  const [courses,      setCourses]      = useState([]);
+  const [professors,   setProfessors]   = useState([]);
+  const [allStudents,  setAllStudents]  = useState([]);
+  const [loading,      setLoading]      = useState(true);
+  const [expanded,     setExpanded]     = useState(null);
+  const [enrolled,     setEnrolled]     = useState({});
+  const [enrollId,     setEnrollId]     = useState("");
+  const [enrolling,    setEnrolling]    = useState(false);
+  const [enrollErr,    setEnrollErr]    = useState("");
+  const [deleting,     setDeleting]     = useState(null);
+  const [showCreate,   setShowCreate]   = useState(false);
+  const [showCsv,      setShowCsv]      = useState(false);
+  const [searchQuery,  setSearchQuery]  = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [cRes, pRes, sRes] = await Promise.all([
-        getAdminCourses(),
-        getAdminProfessors(),
-        getAdminStudents(),
+      const [cRes, uRes] = await Promise.all([
+        getAllCourses(),
+        getAllUsers(),
       ]);
-      setCourses(cRes.data);
-      setProfessors(pRes.data);
-      setStudents(sRes.data);
-    } catch {}
-    finally { setLoading(false); }
+      setCourses(Array.isArray(cRes.data) ? cRes.data : []);
+      const users = Array.isArray(uRes.data) ? uRes.data : [];
+      setProfessors(users.filter(u => u.role === "prof"));
+      setAllStudents(users.filter(u => u.role === "student" || u.role === "ta"));
+    } catch (e) {
+      console.error("AdminCourses load failed:", e);
+    } finally { setLoading(false); }
   }, []);
 
   useEffect(() => { load(); }, [load]);
 
-  const filtered = courses.filter(c =>
-    c.name.toLowerCase().includes(query.toLowerCase()) ||
-    String(c.id || c._id).toLowerCase().includes(query.toLowerCase())
+  const loadEnrolled = async (courseId) => {
+    try {
+      const r = await getCourseEnrolled(courseId);
+      setEnrolled(e => ({ ...e, [courseId]: r.data }));
+    } catch {}
+  };
+
+  const handleExpand = (courseId) => {
+    if (expanded === courseId) { setExpanded(null); return; }
+    setExpanded(courseId);
+    setEnrollErr("");
+    if (!enrolled[courseId]) loadEnrolled(courseId);
+  };
+
+  const handleEnroll = async (courseId) => {
+    if (!enrollId.trim()) return setEnrollErr("Enter a student ID");
+    setEnrolling(true); setEnrollErr("");
+    try {
+      await enrollStudent({ student: enrollId.trim(), course: courseId });
+      setEnrollId(""); await loadEnrolled(courseId); await load();
+    } catch (e) {
+      setEnrollErr(e.response?.data?.error || "Enrollment failed.");
+    } finally { setEnrolling(false); }
+  };
+
+  const handleUnenroll = async (studentId, courseId) => {
+    try {
+      await unenrollStudent({ student: studentId, course: courseId });
+      await loadEnrolled(courseId); await load();
+    } catch {}
+  };
+
+  const handleDelete = async (courseId) => {
+    if (!window.confirm("Delete this course and all its data?")) return;
+    setDeleting(courseId);
+    try { await deleteCourse(courseId); await load(); }
+    catch {} finally { setDeleting(null); }
+  };
+
+  const filteredCourses = courses.filter(c =>
+    (c.name || "").toLowerCase().includes(searchQuery.toLowerCase()) ||
+    (c._id || c.id || "").toLowerCase().includes(searchQuery.toLowerCase()) ||
+    (c.department || "").toLowerCase().includes(searchQuery.toLowerCase())
   );
 
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="animate-slide-up flex items-center justify-between">
-        <div>
-          <h1 className="text-snow text-2xl font-bold tracking-tight">Courses</h1>
-          <p className="text-soft text-sm mt-1">
-            Create courses, enroll students, assign TAs, and view attendance analytics.
-          </p>
+      <div className="animate-slide-up flex items-center justify-between flex-wrap gap-3">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-azure-500/15 flex items-center justify-center border border-azure-500/20">
+            <BookOpen size={18} className="text-azure-400" />
+          </div>
+          <div>
+            <h1 className="text-snow text-2xl font-bold tracking-tight">Courses</h1>
+            <p className="text-soft text-sm mt-0.5">{courses.length} courses · manage enrollment, TAs & attendance</p>
+          </div>
         </div>
         <div className="flex items-center gap-2">
-          <button onClick={load} className="text-dim hover:text-snow transition-colors p-2 rounded-xl hover:bg-white/5">
-            <RefreshCw size={14} />
+          <button onClick={() => setShowCsv(v => !v)}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-violet-500/15 text-violet-400 text-xs
+              border border-violet-500/20 hover:bg-violet-500/25 transition-colors">
+            <Upload size={12} /> {showCsv ? "Hide CSV" : "CSV Import"}
           </button>
-          <Button onClick={() => setShowCreate(true)}>
-            <Plus size={14} /> New Course
-          </Button>
+          <button onClick={() => setShowCreate(v => !v)}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-azure-500/15 text-azure-400 text-xs
+              border border-azure-500/20 hover:bg-azure-500/25 transition-colors">
+            <Plus size={12} /> {showCreate ? "Cancel" : "New Course"}
+          </button>
+          <button onClick={load} className="p-1.5 rounded-lg bg-card border border-edge text-dim hover:text-snow transition-colors">
+            <RefreshCw size={13} />
+          </button>
         </div>
       </div>
 
-      {/* Search bar */}
-      <div className="relative max-w-sm animate-slide-up" style={{ animationDelay: "60ms" }}>
-        <Search size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-dim" />
-        <input value={query} onChange={e => setQuery(e.target.value)}
-          placeholder="Search courses…"
-          className="w-full bg-card border border-edge rounded-xl text-sm text-snow placeholder:text-dim
-            focus:outline-none focus:border-azure-500 transition-all pl-10 pr-4 py-2.5" />
-      </div>
+      {/* CSV Panel */}
+      {showCsv && <CsvPanel onDone={load} />}
 
-      {/* Courses list */}
-      {loading ? (
-        <div className="flex justify-center py-20"><Spinner size={28} /></div>
-      ) : filtered.length === 0 ? (
-        <Empty icon={BookOpen} title="No courses found"
-          sub={courses.length === 0 ? "Create your first course to get started." : "No courses match your search."} />
-      ) : (
-        <div className="space-y-4">
-          {filtered.map((c, i) => (
-            <CourseRow
-              key={c.id || c._id}
-              course={c}
-              professors={professors}
-              allStudents={students}
-              colorIdx={i}
-              onDelete={(id) => setCourses(cs => cs.filter(x => (x.id || x._id) !== id))}
-              onRefresh={load}
-            />
-          ))}
-        </div>
+      {/* Create Course Form */}
+      {showCreate && (
+        <CreateCourseForm
+          professors={professors}
+          onCreated={() => { setShowCreate(false); load(); }}
+          onCancel={() => setShowCreate(false)}
+        />
       )}
 
-      {showCreate && (
-        <CreateCourseModal
-          professors={professors}
-          onClose={() => setShowCreate(false)}
-          onCreated={(newCourse) => {
-            setCourses(cs => [newCourse, ...cs]);
-          }}
-        />
+      {/* Search */}
+      <div className="relative max-w-sm">
+        <Search size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-dim" />
+        <input value={searchQuery} onChange={e => setSearchQuery(e.target.value)}
+          placeholder="Search courses…"
+          className="w-full bg-card border border-edge rounded-xl text-sm text-snow pl-10 pr-4 py-2.5
+            focus:outline-none focus:border-azure-500 transition-all placeholder:text-dim" />
+      </div>
+
+      {/* Course list */}
+      {loading ? (
+        <div className="flex items-center justify-center h-40"><Spinner size={24} /></div>
+      ) : filteredCourses.length === 0 ? (
+        <Empty icon={BookOpen} title="No courses found" sub="Create a course to get started." />
+      ) : (
+        <div className="space-y-3">
+          {filteredCourses.map(c => {
+            const courseId = c._id || c.id;
+            const taCount  = (c.tas || []).length;
+            return (
+              <div key={courseId}
+                className="bg-card border border-edge rounded-2xl overflow-hidden">
+                {/* Course header */}
+                <button onClick={() => handleExpand(courseId)}
+                  className="w-full flex items-center gap-4 px-5 py-4 hover:bg-white/2 transition-colors text-left">
+                  <div className="w-9 h-9 rounded-xl bg-azure-500/15 border border-azure-500/20 flex items-center justify-center shrink-0">
+                    <BookOpen size={15} className="text-azure-400" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <p className="text-snow text-sm font-semibold">{c.name}</p>
+                      <span className="text-dim text-xs font-mono">({courseId})</span>
+                      <Badge label={`Slot ${c.slot}`} variant="manual" />
+                    </div>
+                    <div className="flex items-center gap-3 mt-0.5 flex-wrap">
+                      <span className="text-dim text-xs">{c.department}</span>
+                      <span className="text-dim text-xs">·</span>
+                      <span className="text-dim text-xs">{c.venue}</span>
+                      <span className="text-dim text-xs">·</span>
+                      <span className="text-soft text-xs font-mono">
+                        <Users size={10} className="inline mr-1" />{c.enrolled || 0} enrolled
+                      </span>
+                      {taCount > 0 && (
+                        <>
+                          <span className="text-dim text-xs">·</span>
+                          <span className="text-amber-400 text-xs font-mono">
+                            {taCount} TA{taCount !== 1 ? "s" : ""}
+                          </span>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button onClick={e => { e.stopPropagation(); handleDelete(courseId); }}
+                      disabled={deleting === courseId}
+                      className="p-1.5 rounded-lg text-dim hover:text-rose-400 hover:bg-rose-500/10 transition-colors">
+                      {deleting === courseId ? <Spinner size={14} /> : <Trash2 size={14} />}
+                    </button>
+                    {expanded === courseId
+                      ? <ChevronUp size={16} className="text-dim" />
+                      : <ChevronDown size={16} className="text-dim" />}
+                  </div>
+                </button>
+
+                {/* Expanded content */}
+                {expanded === courseId && (
+                  <div className="border-t border-edge bg-ink px-5 py-4 space-y-5 animate-slide-up">
+                    {/* Instructors row */}
+                    <div>
+                      <p className="text-soft text-xs font-medium uppercase tracking-wider mb-1.5">Instructors</p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {(c.instructors || []).map(id => (
+                          <span key={id} className="px-2.5 py-1 rounded-lg bg-violet-500/15 text-violet-400 text-xs border border-violet-500/20 font-mono">{id}</span>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* TA Management */}
+                    <TaPanel
+                      courseId={courseId}
+                      currentTas={c.tas || []}
+                      allStudents={allStudents}
+                      onRefresh={load}
+                    />
+
+                    {/* Enroll student */}
+                    <div className="space-y-2">
+                      <p className="text-soft text-xs font-medium uppercase tracking-wider">Enroll Student</p>
+                      <div className="flex gap-2">
+                        <input value={enrollId} onChange={e => setEnrollId(e.target.value)}
+                          placeholder="Student ID"
+                          onKeyDown={e => e.key === "Enter" && handleEnroll(courseId)}
+                          className="flex-1 bg-card border border-edge rounded-xl text-xs text-snow px-3 py-1.5
+                            focus:outline-none focus:border-jade-500 placeholder:text-dim transition-all" />
+                        <button onClick={() => handleEnroll(courseId)} disabled={enrolling}
+                          className="px-3 py-1.5 rounded-xl bg-jade-500/15 text-jade-400 text-xs border border-jade-500/20
+                            hover:bg-jade-500/25 transition-colors disabled:opacity-50">
+                          {enrolling ? <Spinner size={11} /> : "Enroll"}
+                        </button>
+                      </div>
+                      {enrollErr && <p className="text-rose-400 text-xs">{enrollErr}</p>}
+                      {/* Enrolled list */}
+                      {(enrolled[courseId] || []).length > 0 && (
+                        <div className="space-y-1 max-h-28 overflow-y-auto mt-1">
+                          {(enrolled[courseId] || []).map(s => (
+                            <div key={s._id || s.id} className="flex items-center gap-2 py-0.5">
+                              <span className="text-snow text-xs flex-1 font-mono">{s._id || s.id} — {s.name}</span>
+                              <button onClick={() => handleUnenroll(s._id || s.id, courseId)}
+                                className="text-dim hover:text-rose-400 transition-colors">
+                                <X size={12} />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Student attendance stats */}
+                    <CourseStudentStats courseId={courseId} />
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
       )}
     </div>
   );
