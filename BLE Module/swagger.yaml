@@ -1,64 +1,151 @@
-swagger: "2.0"
+openapi: 3.0.0
 info:
-  title: Beacon API
-  version: "1.0"
+  title: Attendance Service API
+  version: 1.0.0
+  description: BLE and QR based attendance system
 
-host: localhost:4040
-basePath: /
-schemes:
-  - http
+servers:
+  - url: http://localhost:8000
 
 paths:
 
-  /getMinor:
-    get:
-      summary: Get minor for a given major
-      parameters:
-        - name: major
-          in: query
-          required: true
-          type: integer
+  /ble/generate-minor:
+    post:
+      summary: Generate minor for BLE device
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - major_id
+              properties:
+                major_id:
+                  type: string
+                  example: abc123
       responses:
-        200:
-          description: Minor value returned
-          schema:
-            type: string
-            example: "52344"
-        400:
-          description: Missing major
-          schema:
-            type: string
-            example: "missing major"
+        '200':
+          description: Minor generated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  minor:
+                    type: string
+                    example: "1721"
+                  expires_in:
+                    type: integer
+                    example: 45
 
-  /validate:
-    get:
-      summary: Validate major-minor pair
-      parameters:
-        - name: major
-          in: query
-          required: true
-          type: integer
-        - name: minor
-          in: query
-          required: true
-          type: integer
+  /ble/validate:
+    post:
+      summary: Validate BLE attendance
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - class_id
+                - beacons
+              properties:
+                class_id:
+                  type: string
+                  example: CS101
+                beacons:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - major
+                      - minor
+                      - rssi
+                    properties:
+                      major:
+                        type: string
+                        example: abc123
+                      minor:
+                        type: string
+                        example: "1721"
+                      rssi:
+                        type: integer
+                        example: -68
       responses:
-        200:
+        '200':
           description: Validation result
-          schema:
-            type: object
-            properties:
-              valid:
-                type: boolean
-                example: true
-        400:
-          description: Missing parameters
-          schema:
-            type: object
-            properties:
-              valid:
-                type: boolean
-                example: false
-              error:
-                type: string
-                example: missing major or minor
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  valid:
+                    type: boolean
+                    example: true
+
+  /qr/generate:
+    post:
+      summary: Generate QR hash for class
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - class_id
+              properties:
+                class_id:
+                  type: string
+                  example: CS101
+      responses:
+        '200':
+          description: QR hash generated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  hash:
+                    type: string
+                    example: a1b2c3d4
+                  expires_in:
+                    type: integer
+                    example: 15
+
+  /qr/validate:
+    post:
+      summary: Validate QR attendance
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - class_id
+                - hash
+                - timestamp
+              properties:
+                class_id:
+                  type: string
+                  example: CS101
+                hash:
+                  type: string
+                  example: a1b2c3d4
+                timestamp:
+                  type: integer
+                  example: 1712770000000
+      responses:
+        '200':
+          description: Validation result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  valid:
+                    type: boolean
+                    example: true

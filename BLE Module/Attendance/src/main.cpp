@@ -7,7 +7,7 @@ const char* ssid = "WaitForIt";
 const char* password = "azsxdcfv";
 
 // ---------------- SERVER ----------------
-String serverURL = "http://192.168.0.110:4040/getMinor";
+String serverURL = "http://192.168.0.118:8000/ble/generate-minor";
 
 // ---------------- BEACON ----------------
 uint16_t major = 100;
@@ -18,14 +18,21 @@ NimBLEAdvertising *pAdvertising;
 
 // Correct UUID bytes
 // BEACON_UUID "550e8400-e29b-41d4-a716-446655440000"
+// uint8_t uuidBytes[16] = {
+//   0x55, 0x0e, 0x84, 0x00,
+//   0xe2, 0x9b,
+//   0x41, 0xd4,
+//   0xa7, 0x16,
+//   0x44, 0x66, 0x55, 0x44, 0x00, 0x00
+// };
+// Custom UUID: "IITH-ATTENDANCE " (Must be exactly 16 bytes)
 uint8_t uuidBytes[16] = {
-  0x55, 0x0e, 0x84, 0x00,
-  0xe2, 0x9b,
-  0x41, 0xd4,
-  0xa7, 0x16,
-  0x44, 0x66, 0x55, 0x44, 0x00, 0x00
+  0x49, 0x49, 0x54, 0x48, // I I T H
+  0x2D, 0x41,             // - A
+  0x54, 0x54,             // T T
+  0x45, 0x4E,             // E N
+  0x44, 0x41, 0x4E, 0x43, 0x45, 0x20 // D A N C E [space]
 };
-
 
 // ---------------- WIFI ----------------
 void connectWiFi() {
@@ -113,43 +120,79 @@ std::string createBeaconData(uint16_t major, uint16_t minor) {
 
 
 // ---------------- START BEACON ----------------
+// void startBeacon(uint16_t major, uint16_t minor) {
+
+//   NimBLEAdvertisementData advData;
+
+//   std::string payload = createBeaconData(major, minor);
+
+//   advData.setManufacturerData(payload);
+
+//   pAdvertising->setAdvertisementData(advData);
+
+//   pAdvertising->setMinInterval(0x20);  // ~20ms
+//   pAdvertising->setMaxInterval(0x40);  // ~40ms
+
+//   pAdvertising->start();
+
+//   Serial.println("Beacon broadcasting");
+// }
 void startBeacon(uint16_t major, uint16_t minor) {
 
-  NimBLEAdvertisementData advData;
+    pAdvertising->stop();
 
-  std::string payload = createBeaconData(major, minor);
+    NimBLEAdvertisementData advData;
+    std::string payload = createBeaconData(major, minor);
+    advData.setManufacturerData(payload);
+    advData.setFlags(0x06);  // LE General Discoverable + BR/EDR Not Supported
 
-  advData.setManufacturerData(payload);
+    // Setting intervals BEFORE setting data
+    pAdvertising->setMinInterval(160);  // 160 * 0.625ms = 100ms
+    pAdvertising->setMaxInterval(320);  // 320 * 0.625ms = 200ms
 
-  pAdvertising->setAdvertisementData(advData);
+    pAdvertising->setAdvertisementData(advData);
 
-  pAdvertising->setMinInterval(0x20);  // ~20ms
-  pAdvertising->setMaxInterval(0x40);  // ~40ms
+    // Disable scan response by setting empty scan response data
+    NimBLEAdvertisementData emptyScanRsp;
+    pAdvertising->setScanResponseData(emptyScanRsp);
 
-  pAdvertising->start();
-
-  Serial.println("Beacon broadcasting");
+    pAdvertising->start();
+    Serial.println("Beacon started at 100-200ms interval");
 }
-
 
 // ---------------- SETUP ----------------
+// void setup() {
+
+//   Serial.begin(115200);
+
+//   connectWiFi();
+
+//   NimBLEDevice::init("ESP32 Beacon");
+
+//   pAdvertising = NimBLEDevice::getAdvertising();
+
+//   minor = fetchMinor();
+
+//   if (minor == 0) minor = 1;
+
+//   startBeacon(major, minor);
+// }
+
 void setup() {
+    Serial.begin(115200);
+    connectWiFi();
 
-  Serial.begin(115200);
+    NimBLEDevice::init("ESP32 Beacon");
 
-  connectWiFi();
+    NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_RANDOM);
 
-  NimBLEDevice::init("ESP32 Beacon");
+    pAdvertising = NimBLEDevice::getAdvertising();
 
-  pAdvertising = NimBLEDevice::getAdvertising();
+    minor = fetchMinor();
+    if (minor == 0) minor = 1;
 
-  minor = fetchMinor();
-
-  if (minor == 0) minor = 1;
-
-  startBeacon(major, minor);
+    startBeacon(major, minor);
 }
-
 
 // ---------------- LOOP ----------------
 void loop() {
