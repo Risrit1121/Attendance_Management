@@ -161,8 +161,6 @@ export default function CourseView({ course, goBack }) {
   const [attendance,   setAttendance]   = useState([]);
   const [loadingStart, setLoadingStart] = useState(false);
   const [error,        setError]        = useState("");
-  // FIX: elapsed is now initialised from the session's startedAt when restoring,
-  // so re-entering the course card does not reset the duration display to 0.
   const [elapsed,      setElapsed]      = useState(0);
 
   // Schedule state
@@ -170,9 +168,12 @@ export default function CourseView({ course, goBack }) {
   const [schLoading,   setSchLoading]   = useState(true);
   const [showSchForm,  setShowSchForm]  = useState(false);
   const [schSaving,    setSchSaving]    = useState(false);
+  // FIX: removed `switch` field from newSch default — the checkbox is gone.
+  // New schedules always start with auto-start OFF; the toggle on the row
+  // controls it after saving.
   const [newSch,       setNewSch]       = useState({
     scheduledDay: "Monday", startTime: "09:00", endTime: "09:50",
-    method: "BLE", switch: false,
+    method: "BLE",
   });
 
   // Manual attendance
@@ -198,10 +199,6 @@ export default function CourseView({ course, goBack }) {
   useEffect(() => { loadSchedules(); }, [loadSchedules]);
 
   // ── Restore active session on mount ──────────────────────────────────────
-  // FIX: When restoring an existing session, calculate how many seconds have
-  // already elapsed since the session started (using startedAt from the API
-  // response). Previously elapsed was always reset to 0 on restore, so every
-  // time you navigated back into the course card the timer restarted from 0.
   useEffect(() => {
     async function restore() {
       try {
@@ -210,7 +207,6 @@ export default function CourseView({ course, goBack }) {
           setSession(res.data);
           setMode(res.data.method || "BLE");
 
-          // Compute seconds already elapsed since the session started
           const startedAt = res.data.startedAt;
           if (startedAt) {
             const startMs  = new Date(startedAt).getTime();
@@ -230,7 +226,7 @@ export default function CourseView({ course, goBack }) {
     try {
       const res = await startSession({ course_id: courseId, mode });
       setSession(res.data);
-      setElapsed(0); // brand-new session — start from 0
+      setElapsed(0);
     } catch (e) {
       setError(e.response?.data?.error || "Could not start session.");
     } finally {
@@ -274,9 +270,6 @@ export default function CourseView({ course, goBack }) {
   }, [session]);
 
   // ── Elapsed timer ─────────────────────────────────────────────────────────
-  // This just ticks every second from whatever elapsed was initialised to.
-  // On restore: elapsed starts from the already-computed seconds since startedAt.
-  // On fresh start: elapsed starts from 0.
   useEffect(() => {
     if (!session) return;
     const t = setInterval(() => setElapsed(e => e + 1), 1000);
@@ -298,10 +291,11 @@ export default function CourseView({ course, goBack }) {
   const handleAddSchedule = async () => {
     setSchSaving(true);
     try {
-      await apiAddSchedule(courseId, newSch);
+      // Always add with switch: false — professor enables it via the row toggle
+      await apiAddSchedule(courseId, { ...newSch, switch: false });
       await loadSchedules();
       setShowSchForm(false);
-      setNewSch({ scheduledDay: "Monday", startTime: "09:00", endTime: "09:50", method: "BLE", switch: false });
+      setNewSch({ scheduledDay: "Monday", startTime: "09:00", endTime: "09:50", method: "BLE" });
     } catch (e) {
       setError(e.response?.data?.error || "Could not add schedule.");
     } finally {
@@ -536,7 +530,10 @@ export default function CourseView({ course, goBack }) {
           )}
         </div>
 
-        {/* Add form */}
+        {/* Add form — FIX: "Enable auto-start" checkbox removed.
+            The switch toggle on each ScheduleRow already handles this.
+            New schedules always save with switch: false and the professor
+            enables auto-start afterwards via the row toggle. */}
         {showSchForm && !isTa && (
           <div className="px-5 py-4 border-b border-edge bg-ink space-y-3">
             <p className="text-snow text-xs font-semibold">New recurring schedule</p>
@@ -569,13 +566,6 @@ export default function CourseView({ course, goBack }) {
                   onChange={e => setNewSch(s => ({ ...s, endTime: e.target.value }))}
                   className="w-full bg-card border border-edge rounded-xl text-sm text-snow px-3 py-2 focus:outline-none focus:border-violet-500 transition-all" />
               </div>
-            </div>
-            <div className="flex items-center gap-3">
-              <label className="flex items-center gap-2 text-xs text-soft cursor-pointer">
-                <input type="checkbox" checked={newSch.switch}
-                  onChange={e => setNewSch(s => ({ ...s, switch: e.target.checked }))} />
-                Enable auto-start
-              </label>
             </div>
             <div className="flex gap-2">
               <button onClick={handleAddSchedule} disabled={schSaving}
@@ -617,6 +607,7 @@ export default function CourseView({ course, goBack }) {
           </div>
         )}
       </div>
+
     </div>
   );
 }

@@ -1,13 +1,38 @@
+/**
+ * autoSessionService.js
+ *
+ * FIX: scheduledTime is now stored as proper UTC (after the lecturePopulator
+ * fix).  The ±2-minute window query against MongoDB is correct.
+ *
+ * Previously the "covered" check converted the stored UTC time to local hours/
+ * minutes and compared against IST schedule strings — causing an off-by-5h30m
+ * mismatch.  We now convert the stored UTC timestamp to IST before extracting
+ * hours/minutes for that comparison.
+ */
 const Course   = require('../models/Course');
 const Session  = require('../models/Session');
 
-const DAY_NAMES = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+const DAY_NAMES     = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000; // 19 800 000 ms
+
+/** Return { dayIdx, hours, minutes } of a UTC Date expressed in IST */
+function toIST(utcDate) {
+  const istMs  = utcDate.getTime() + IST_OFFSET_MS;
+  const d      = new Date(istMs);
+  return {
+    dayIdx:  d.getUTCDay(),
+    hours:   d.getUTCHours(),
+    minutes: d.getUTCMinutes(),
+  };
+}
 
 async function autoCreateFallbackSessions() {
   const now         = new Date();
-  const todayName   = DAY_NAMES[now.getDay()];
   const windowStart = new Date(now.getTime() - 2 * 60000);
   const windowEnd   = new Date(now.getTime() + 2 * 60000);
+
+  const { dayIdx: todayIdxIST } = toIST(now);
+  const todayName = DAY_NAMES[todayIdxIST];
 
   const courses = await Course.find({
     'lectures.scheduledTime': { $gte: windowStart, $lte: windowEnd },
@@ -22,8 +47,9 @@ async function autoCreateFallbackSessions() {
     );
 
     for (const lecture of dueLectures) {
-      const lecTime = new Date(lecture.scheduledTime);
-      const lecMin  = lecTime.getHours() * 60 + lecTime.getMinutes();
+      // Convert stored UTC time to IST to compare against schedule strings
+      const { hours, minutes } = toIST(new Date(lecture.scheduledTime));
+      const lecMin = hours * 60 + minutes;
 
       const covered = (course.schedules || []).some(s => {
         if (s.scheduledDay !== todayName) return false;
