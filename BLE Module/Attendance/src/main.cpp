@@ -7,7 +7,7 @@ const char* ssid = "WaitForIt";
 const char* password = "azsxdcfv";
 
 // ---------------- SERVER ----------------
-String serverURL = "http://192.168.0.118:8000/ble/generate-minor";
+String serverURL = "https://ble-qr-microservice.onrender.com/ble/generate-minor";
 
 // ---------------- BEACON ----------------
 uint16_t major = 100;
