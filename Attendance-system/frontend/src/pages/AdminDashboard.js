@@ -1,11 +1,15 @@
 import { useState, useEffect, useCallback } from "react";
-import { getAdminStats, getAllCourses, createCourse, getAllUsers, createProfessor,
-  createStudent, deleteProfessor, deleteStudent, enrollStudent, unenrollStudent,
-  getCourseEnrolled, getAdminStudentAnalytics, enrollBulk } from "../api/client";
+import {
+  getAdminStats, getAllCourses, createCourse, deleteCourse,
+  getAllUsers, createProfessor, createStudent, deleteProfessor, deleteStudent,
+  enrollStudent, unenrollStudent, getCourseEnrolled,
+  getAdminStudentAnalytics, addTA, removeTA,
+} from "../api/client";
+import API from "../api/client";
 import {
   Shield, Activity, Users, AlertTriangle, CheckCircle2, Server,
-  Plus, Trash2, RefreshCw, BookOpen, GraduationCap, ChevronDown,
-  ChevronUp, X, Search, BarChart3,
+  Plus, Trash2, BookOpen, ChevronDown, ChevronUp, X,
+  Search, BarChart3, GraduationCap, UserPlus,
 } from "lucide-react";
 import { Badge, Spinner, ProgressBar, AttendancePct } from "../components/UI";
 
@@ -20,7 +24,6 @@ function formatIST(utcStr) {
 }
 
 const SLOTS = ["A","B","C","D","E","F","G","P","Q","R","S","W","X","Y","Z"];
-
 const ROLE_COLORS = {
   admin:   "text-rose-400 bg-rose-500/15 border-rose-500/20",
   prof:    "text-azure-400 bg-azure-500/15 border-azure-500/20",
@@ -28,7 +31,7 @@ const ROLE_COLORS = {
   ta:      "text-amber-400 bg-amber-500/15 border-amber-500/20",
 };
 
-// ── Student Analytics Modal ───────────────────────────────────────────────────
+// ── Student Analytics Modal (bucket-backed) ───────────────────────────────────
 function StudentAnalyticsModal({ student, onClose }) {
   const [data,    setData]    = useState(null);
   const [loading, setLoading] = useState(true);
@@ -52,7 +55,9 @@ function StudentAnalyticsModal({ student, onClose }) {
             </div>
             <div>
               <p className="text-snow font-semibold text-sm">{student.name}</p>
-              <p className="text-soft text-xs font-mono">{student.email} · Course Analytics</p>
+              <p className="text-soft text-xs font-mono">
+                {student.email} · {data?.cached ? "from cache" : "live data"}
+              </p>
             </div>
           </div>
           <button onClick={onClose}
@@ -60,11 +65,10 @@ function StudentAnalyticsModal({ student, onClose }) {
             <X size={15} />
           </button>
         </div>
-
         <div className="px-6 py-5">
           {loading ? (
             <div className="flex items-center justify-center h-40"><Spinner size={24} /></div>
-          ) : !data || data.courses.length === 0 ? (
+          ) : !data?.courses?.length ? (
             <p className="text-soft text-sm text-center py-10">No enrolled courses.</p>
           ) : (
             <div className="space-y-3 max-h-96 overflow-y-auto">
@@ -76,7 +80,7 @@ function StudentAnalyticsModal({ student, onClose }) {
                   </div>
                   <ProgressBar value={c.attendancePct} max={100} size="sm" />
                   <p className="text-dim text-xs font-mono mt-1.5">
-                    {c.attended} / {c.sessionsHeld} lectures attended · {c.totalLectures} scheduled
+                    {c.attended} / {c.sessionsHeld} lectures attended
                   </p>
                 </div>
               ))}
@@ -88,105 +92,94 @@ function StudentAnalyticsModal({ student, onClose }) {
   );
 }
 
-// ── Course Creation Panel ─────────────────────────────────────────────────────
-function CreateCoursePanel({ onCreated }) {
-  const blank = {
-    _id: "", name: "", department: "", slot: "A",
-    venue: "", startDate: "", endDate: "",
-    instructors: "", tas: "",
-  };
-  const [form,     setForm]     = useState(blank);
-  const [creating, setCreating] = useState(false);
-  const [err,      setErr]      = useState("");
-  const [success,  setSuccess]  = useState("");
+// ── TA Management Panel (within expanded course) ──────────────────────────────
+function TaPanel({ courseId, currentTas, onRefresh }) {
+  const [newTaId,   setNewTaId]   = useState("");
+  const [adding,    setAdding]    = useState(false);
+  const [removing,  setRemoving]  = useState(null);
+  const [err,       setErr]       = useState("");
 
-  const set = k => e => setForm(f => ({ ...f, [k]: e.target.value }));
-
-  const handle = async () => {
-    setErr(""); setSuccess("");
-    if (!form._id || !form.name || !form.department || !form.slot ||
-        !form.venue || !form.startDate || !form.endDate) {
-      return setErr("All fields except instructors/TAs are required.");
-    }
-    setCreating(true);
+  const handleAdd = async () => {
+    if (!newTaId.trim()) return setErr("Enter a student ID");
+    setAdding(true); setErr("");
     try {
-      await createCourse({
-        ...form,
-        instructors: form.instructors ? form.instructors.split(",").map(s => s.trim()).filter(Boolean) : [],
-        tas:         form.tas         ? form.tas.split(",").map(s => s.trim()).filter(Boolean)         : [],
-        startDate:   new Date(form.startDate).toISOString(),
-        endDate:     new Date(form.endDate).toISOString(),
-      });
-      setSuccess(`Course "${form.name}" created with lectures auto-populated.`);
-      setForm(blank);
-      onCreated?.();
+      await addTA(courseId, newTaId.trim());
+      setNewTaId("");
+      onRefresh();
     } catch (e) {
-      setErr(e.response?.data?.error || "Could not create course.");
-    } finally {
-      setCreating(false);
-    }
+      setErr(e.response?.data?.error || "Failed to add TA");
+    } finally { setAdding(false); }
   };
 
-  const field = (label, key, type = "text", extra = {}) => (
-    <div className="space-y-1">
-      <label className="text-xs text-soft">{label}</label>
-      <input type={type} value={form[key]} onChange={set(key)} {...extra}
-        className="w-full bg-card border border-edge rounded-xl text-sm text-snow px-3 py-2
-          focus:outline-none focus:border-azure-500 transition-all placeholder:text-dim" />
-    </div>
-  );
+  const handleRemove = async (studentId) => {
+    setRemoving(studentId);
+    try {
+      await removeTA(courseId, studentId);
+      onRefresh();
+    } catch {} finally { setRemoving(null); }
+  };
 
   return (
-    <div className="space-y-4">
-      <div className="grid grid-cols-2 gap-3">
-        {field("Course ID (e.g. CS101)", "_id", "text", { placeholder: "CS101" })}
-        {field("Course Name", "name", "text", { placeholder: "Introduction to CS" })}
-        {field("Department", "department", "text", { placeholder: "CSE" })}
+    <div className="space-y-2">
+      <p className="text-soft text-xs font-medium uppercase tracking-wider">Teaching Assistants</p>
+      {(currentTas || []).length === 0 ? (
+        <p className="text-dim text-xs">No TAs assigned.</p>
+      ) : (
         <div className="space-y-1">
-          <label className="text-xs text-soft">Slot</label>
-          <select value={form.slot} onChange={set("slot")}
-            className="w-full bg-card border border-edge rounded-xl text-sm text-snow px-3 py-2
-              focus:outline-none focus:border-azure-500 transition-all appearance-none">
-            {SLOTS.map(s => <option key={s} value={s}>{s}</option>)}
-          </select>
+          {currentTas.map(taId => (
+            <div key={taId} className="flex items-center gap-2">
+              <span className="text-amber-400 text-xs font-mono flex-1">{taId}</span>
+              <button onClick={() => handleRemove(taId)} disabled={removing === taId}
+                className="text-dim hover:text-rose-400 transition-colors">
+                {removing === taId ? <Spinner size={11} /> : <X size={12} />}
+              </button>
+            </div>
+          ))}
         </div>
-        {field("Venue / Classroom ID", "venue", "text", { placeholder: "TT101" })}
-        {field("Start Date", "startDate", "date")}
-        {field("End Date", "endDate", "date")}
-        {field("Instructor IDs (comma-sep)", "instructors", "text", { placeholder: "prof01, prof02" })}
-        {field("TA IDs (comma-sep)", "tas", "text", { placeholder: "20CSE001" })}
+      )}
+      <div className="flex gap-2 mt-2">
+        <input value={newTaId} onChange={e => setNewTaId(e.target.value)}
+          placeholder="Student ID to add as TA"
+          className="flex-1 bg-card border border-edge rounded-xl text-xs text-snow px-3 py-1.5
+            focus:outline-none focus:border-amber-500 placeholder:text-dim transition-all" />
+        <button onClick={handleAdd} disabled={adding}
+          className="px-3 py-1.5 rounded-xl bg-amber-500/15 text-amber-400 text-xs border border-amber-500/20
+            hover:bg-amber-500/25 transition-colors disabled:opacity-50 flex items-center gap-1">
+          {adding ? <Spinner size={11} /> : <UserPlus size={12} />}
+          Add TA
+        </button>
       </div>
-      {err     && <p className="text-rose-400 text-xs">{err}</p>}
-      {success && <p className="text-jade-400 text-xs">{success}</p>}
-      <button onClick={handle} disabled={creating}
-        className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-azure-500/15 text-azure-400 text-xs font-medium
-          border border-azure-500/20 hover:bg-azure-500/25 transition-colors disabled:opacity-50">
-        {creating ? <Spinner size={12} /> : <Plus size={12} />}
-        {creating ? "Creating…" : "Create Course"}
-      </button>
-      <p className="text-dim text-xs font-mono">
-        Lectures are auto-generated from the slot map between start and end date.
-      </p>
+      {err && <p className="text-rose-400 text-xs">{err}</p>}
     </div>
   );
 }
 
-// ── Course List with Enrollment Panel ─────────────────────────────────────────
+// ── Courses Panel ─────────────────────────────────────────────────────────────
 function CoursesPanel() {
-  const [courses,  setCourses]  = useState([]);
-  const [loading,  setLoading]  = useState(true);
-  const [expanded, setExpanded] = useState(null);
-  const [enrolled, setEnrolled] = useState({});
-  const [enrollId, setEnrollId] = useState("");
+  const [courses,   setCourses]   = useState([]);
+  const [loading,   setLoading]   = useState(true);
+  const [expanded,  setExpanded]  = useState(null);
+  const [enrolled,  setEnrolled]  = useState({});
+  const [enrollId,  setEnrollId]  = useState("");
   const [enrolling, setEnrolling] = useState(false);
   const [enrollErr, setEnrollErr] = useState("");
   const [showCreate, setShowCreate] = useState(false);
+  const [createForm, setCreateForm] = useState({
+    _id:"", name:"", department:"", slot:"A", venue:"", startDate:"", endDate:"", instructors:"", tas:"",
+  });
+  const [creating, setCreating] = useState(false);
+  const [createErr, setCreateErr] = useState("");
 
   const load = useCallback(async () => {
+    setLoading(true);
     try {
       const r = await getAllCourses();
-      setCourses(r.data);
-    } catch {} finally { setLoading(false); }
+      // getAllCourses returns array directly
+      setCourses(Array.isArray(r.data) ? r.data : []);
+    } catch (e) {
+      console.error("getAllCourses failed:", e);
+      setCourses([]);
+    } finally { setLoading(false); }
   }, []);
 
   useEffect(() => { load(); }, [load]);
@@ -224,6 +217,30 @@ function CoursesPanel() {
     } catch {}
   };
 
+  const handleCreate = async () => {
+    setCreateErr("");
+    const f = createForm;
+    if (!f.name || !f.department || !f.venue || !f.startDate || !f.endDate) {
+      return setCreateErr("Name, department, venue, start and end dates are required.");
+    }
+    setCreating(true);
+    try {
+      await createCourse({
+        ...f,
+        _id:         f._id || undefined,
+        instructors: f.instructors ? f.instructors.split(",").map(s=>s.trim()).filter(Boolean) : [],
+        tas:         f.tas         ? f.tas.split(",").map(s=>s.trim()).filter(Boolean)         : [],
+        startDate:   new Date(f.startDate).toISOString(),
+        endDate:     new Date(f.endDate).toISOString(),
+      });
+      setShowCreate(false);
+      setCreateForm({ _id:"",name:"",department:"",slot:"A",venue:"",startDate:"",endDate:"",instructors:"",tas:"" });
+      await load();
+    } catch (e) {
+      setCreateErr(e.response?.data?.error || "Failed to create course.");
+    } finally { setCreating(false); }
+  };
+
   if (loading) return <div className="flex justify-center py-10"><Spinner size={20} /></div>;
 
   return (
@@ -238,68 +255,115 @@ function CoursesPanel() {
       </div>
 
       {showCreate && (
-        <div className="border border-edge rounded-xl p-4 bg-ink animate-slide-up">
-          <p className="text-snow text-xs font-semibold mb-3">Create New Course</p>
-          <CreateCoursePanel onCreated={() => { setShowCreate(false); load(); }} />
+        <div className="border border-edge rounded-xl p-4 bg-ink animate-slide-up space-y-3">
+          <p className="text-snow text-xs font-semibold">Create New Course</p>
+          <div className="grid grid-cols-2 gap-2">
+            {[
+              ["Course ID (optional)", "_id", "text", "CS101"],
+              ["Course Name *", "name", "text", "Introduction to CS"],
+              ["Department *", "department", "text", "CSE"],
+              ["Venue *", "venue", "text", "TT101"],
+              ["Start Date *", "startDate", "date", ""],
+              ["End Date *", "endDate", "date", ""],
+              ["Instructor IDs (comma-sep)", "instructors", "text", "prof01"],
+              ["TA IDs (comma-sep)", "tas", "text", "20CSE001"],
+            ].map(([lbl, key, type, placeholder]) => (
+              <div key={key} className="space-y-1">
+                <label className="text-xs text-soft">{lbl}</label>
+                <input type={type} value={createForm[key]} placeholder={placeholder}
+                  onChange={e => setCreateForm(f => ({ ...f, [key]: e.target.value }))}
+                  className="w-full bg-card border border-edge rounded-xl text-xs text-snow px-3 py-1.5
+                    focus:outline-none focus:border-azure-500 transition-all placeholder:text-dim" />
+              </div>
+            ))}
+            <div className="space-y-1">
+              <label className="text-xs text-soft">Slot</label>
+              <select value={createForm.slot}
+                onChange={e => setCreateForm(f => ({ ...f, slot: e.target.value }))}
+                className="w-full bg-card border border-edge rounded-xl text-xs text-snow px-3 py-1.5
+                  focus:outline-none focus:border-azure-500 transition-all appearance-none">
+                {SLOTS.map(s => <option key={s} value={s}>{s}</option>)}
+              </select>
+            </div>
+          </div>
+          {createErr && <p className="text-rose-400 text-xs">{createErr}</p>}
+          <button onClick={handleCreate} disabled={creating}
+            className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-azure-500/15 text-azure-400 text-xs font-medium
+              border border-azure-500/20 hover:bg-azure-500/25 transition-colors disabled:opacity-50">
+            {creating ? <Spinner size={12} /> : <Plus size={12} />}
+            {creating ? "Creating…" : "Create Course"}
+          </button>
         </div>
       )}
 
-      <div className="space-y-2 max-h-96 overflow-y-auto">
+      <div className="space-y-2 max-h-[500px] overflow-y-auto">
         {courses.length === 0 ? (
           <p className="text-soft text-sm text-center py-8">No courses yet.</p>
-        ) : courses.map(c => (
-          <div key={c._id} className="border border-edge rounded-xl overflow-hidden">
-            <button onClick={() => handleExpand(c._id)}
-              className="w-full flex items-center gap-3 px-4 py-3 bg-ink hover:bg-white/2 transition-colors text-left">
-              <div className="w-7 h-7 rounded-lg bg-azure-500/15 border border-azure-500/20 flex items-center justify-center shrink-0">
-                <BookOpen size={13} className="text-azure-400" />
-              </div>
-              <div className="flex-1 min-w-0">
-                <p className="text-snow text-xs font-medium truncate">{c.name}</p>
-                <p className="text-dim text-xs font-mono">{c._id} · Slot {c.slot} · {c.enrolled || 0} enrolled</p>
-              </div>
-              {expanded === c._id ? <ChevronUp size={14} className="text-dim" /> : <ChevronDown size={14} className="text-dim" />}
-            </button>
+        ) : courses.map(c => {
+          const courseId = c._id || c.id;
+          return (
+            <div key={courseId} className="border border-edge rounded-xl overflow-hidden">
+              <button onClick={() => handleExpand(courseId)}
+                className="w-full flex items-center gap-3 px-4 py-3 bg-ink hover:bg-white/2 transition-colors text-left">
+                <div className="w-7 h-7 rounded-lg bg-azure-500/15 border border-azure-500/20 flex items-center justify-center shrink-0">
+                  <BookOpen size={13} className="text-azure-400" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-snow text-xs font-medium truncate">{c.name}</p>
+                  <p className="text-dim text-xs font-mono">{courseId} · Slot {c.slot} · {c.enrolled || 0} enrolled</p>
+                </div>
+                {expanded === courseId ? <ChevronUp size={14} className="text-dim" /> : <ChevronDown size={14} className="text-dim" />}
+              </button>
 
-            {expanded === c._id && (
-              <div className="px-4 pb-4 pt-2 border-t border-edge bg-ink space-y-3 animate-slide-up">
-                {/* Enrolled students */}
-                <div className="space-y-1 max-h-40 overflow-y-auto">
-                  {(enrolled[c._id] || []).length === 0 ? (
-                    <p className="text-dim text-xs py-2">No students enrolled.</p>
-                  ) : (enrolled[c._id] || []).map(s => (
-                    <div key={s._id} className="flex items-center gap-2 py-1">
-                      <span className="text-snow text-xs flex-1 font-mono">{s._id} — {s.name}</span>
-                      <button onClick={() => handleUnenroll(s._id, c._id)}
-                        className="text-dim hover:text-rose-400 transition-colors">
-                        <X size={12} />
+              {expanded === courseId && (
+                <div className="px-4 pb-4 pt-2 border-t border-edge bg-ink space-y-4 animate-slide-up">
+                  {/* Enrolled students */}
+                  <div>
+                    <p className="text-soft text-xs font-medium uppercase tracking-wider mb-2">Enrolled Students</p>
+                    <div className="space-y-1 max-h-32 overflow-y-auto">
+                      {(enrolled[courseId] || []).length === 0 ? (
+                        <p className="text-dim text-xs">No students enrolled.</p>
+                      ) : (enrolled[courseId] || []).map(s => (
+                        <div key={s._id || s.id} className="flex items-center gap-2 py-0.5">
+                          <span className="text-snow text-xs flex-1 font-mono">{s._id || s.id} — {s.name}</span>
+                          <button onClick={() => handleUnenroll(s._id || s.id, courseId)}
+                            className="text-dim hover:text-rose-400 transition-colors">
+                            <X size={12} />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="flex gap-2 mt-2">
+                      <input value={enrollId} onChange={e => setEnrollId(e.target.value)}
+                        placeholder="Student ID to enroll"
+                        className="flex-1 bg-card border border-edge rounded-xl text-xs text-snow px-3 py-1.5
+                          focus:outline-none focus:border-azure-500 placeholder:text-dim transition-all" />
+                      <button onClick={() => handleEnroll(courseId)} disabled={enrolling}
+                        className="px-3 py-1.5 rounded-xl bg-jade-500/15 text-jade-400 text-xs border border-jade-500/20
+                          hover:bg-jade-500/25 transition-colors disabled:opacity-50">
+                        {enrolling ? <Spinner size={11} /> : "Enroll"}
                       </button>
                     </div>
-                  ))}
+                    {enrollErr && <p className="text-rose-400 text-xs mt-1">{enrollErr}</p>}
+                  </div>
+
+                  {/* TA management */}
+                  <TaPanel
+                    courseId={courseId}
+                    currentTas={c.tas || []}
+                    onRefresh={load}
+                  />
                 </div>
-                {/* Enroll input */}
-                <div className="flex gap-2">
-                  <input value={enrollId} onChange={e => setEnrollId(e.target.value)}
-                    placeholder="Student ID to enroll"
-                    className="flex-1 bg-card border border-edge rounded-xl text-xs text-snow px-3 py-1.5
-                      focus:outline-none focus:border-azure-500 placeholder:text-dim transition-all" />
-                  <button onClick={() => handleEnroll(c._id)} disabled={enrolling}
-                    className="px-3 py-1.5 rounded-xl bg-jade-500/15 text-jade-400 text-xs border border-jade-500/20
-                      hover:bg-jade-500/25 transition-colors disabled:opacity-50">
-                    {enrolling ? <Spinner size={11} /> : "Enroll"}
-                  </button>
-                </div>
-                {enrollErr && <p className="text-rose-400 text-xs">{enrollErr}</p>}
-              </div>
-            )}
-          </div>
-        ))}
+              )}
+            </div>
+          );
+        })}
       </div>
     </div>
   );
 }
 
-// ── Users panel ───────────────────────────────────────────────────────────────
+// ── Users Panel ───────────────────────────────────────────────────────────────
 function UsersPanel() {
   const [users,    setUsers]    = useState([]);
   const [loading,  setLoading]  = useState(true);
@@ -310,16 +374,17 @@ function UsersPanel() {
   const [deleting, setDeleting] = useState(null);
   const [formErr,  setFormErr]  = useState("");
   const [selectedStudent, setSelectedStudent] = useState(null);
-
-  const [form, setForm] = useState({
-    _id: "", name: "", email: "", password: "", role: "student",
-  });
+  const [form, setForm] = useState({ _id:"", name:"", email:"", password:"", role:"student" });
 
   const load = useCallback(async () => {
     try {
       const r = await getAllUsers();
-      setUsers(r.data);
-    } catch {} finally { setLoading(false); }
+      // getAllUsers returns array of users with role field
+      setUsers(Array.isArray(r.data) ? r.data : []);
+    } catch (e) {
+      console.error("getAllUsers failed:", e);
+      setUsers([]);
+    } finally { setLoading(false); }
   }, []);
 
   useEffect(() => { load(); }, [load]);
@@ -329,7 +394,7 @@ function UsersPanel() {
     const q = query.toLowerCase();
     return (u.name || "").toLowerCase().includes(q) ||
            (u.email || "").toLowerCase().includes(q) ||
-           (u.id || "").toLowerCase().includes(q);
+           (u.id || u._id || "").toLowerCase().includes(q);
   });
 
   const handleCreate = async () => {
@@ -339,12 +404,9 @@ function UsersPanel() {
     }
     setCreating(true);
     try {
-      if (form.role === "prof" || form.role === "admin") {
-        await createProfessor({ ...form });
-      } else {
-        await createStudent({ ...form });
-      }
-      setForm({ _id: "", name: "", email: "", password: "", role: "student" });
+      if (form.role === "prof") await createProfessor({ ...form });
+      else await createStudent({ ...form });
+      setForm({ _id:"", name:"", email:"", password:"", role:"student" });
       setShowForm(false);
       await load();
     } catch (e) {
@@ -353,10 +415,10 @@ function UsersPanel() {
   };
 
   const handleDelete = async (u) => {
-    setDeleting(u.id);
+    setDeleting(u.id || u._id);
     try {
-      if (u.role === "prof" || u.role === "admin") await deleteProfessor(u.id);
-      else await deleteStudent(u.id);
+      if (u.role === "prof" || u.role === "admin") await deleteProfessor(u.id || u._id);
+      else await deleteStudent(u.id || u._id);
       await load();
     } catch {} finally { setDeleting(null); }
   };
@@ -365,16 +427,14 @@ function UsersPanel() {
 
   return (
     <div className="space-y-3">
-      {/* Controls */}
       <div className="flex items-center gap-2 flex-wrap">
         <div className="relative flex-1 min-w-32">
           <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-dim" />
-          <input value={query} onChange={e => setQuery(e.target.value)}
-            placeholder="Search users…"
+          <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Search users…"
             className="w-full bg-card border border-edge rounded-xl text-xs text-snow pl-8 pr-3 py-2
               focus:outline-none focus:border-azure-500 transition-all placeholder:text-dim" />
         </div>
-        {["all","student","prof","admin"].map(r => (
+        {["all","student","ta","prof","admin"].map(r => (
           <button key={r} onClick={() => setRoleTab(r)}
             className={`px-3 py-1.5 rounded-xl text-xs font-medium transition-all border
               ${roleTab === r ? "bg-azure-500/15 text-azure-400 border-azure-500/30" : "bg-card text-soft border-edge hover:text-snow"}`}>
@@ -388,16 +448,10 @@ function UsersPanel() {
         </button>
       </div>
 
-      {/* Create form */}
       {showForm && (
         <div className="border border-edge rounded-xl p-4 bg-ink space-y-3 animate-slide-up">
           <div className="grid grid-cols-2 gap-2">
-            {[
-              ["ID", "_id", "text"],
-              ["Name", "name", "text"],
-              ["Email", "email", "email"],
-              ["Password", "password", "password"],
-            ].map(([lbl, key, type]) => (
+            {[["ID","_id","text"],["Name","name","text"],["Email","email","email"],["Password","password","password"]].map(([lbl,key,type]) => (
               <div key={key} className="space-y-1">
                 <label className="text-xs text-soft">{lbl}</label>
                 <input type={type} value={form[key]}
@@ -432,35 +486,36 @@ function UsersPanel() {
         </div>
       )}
 
-      {/* User list */}
       <div className="divide-y divide-edge rounded-xl border border-edge overflow-hidden max-h-80 overflow-y-auto">
         {filtered.length === 0 ? (
           <p className="text-soft text-sm text-center py-8">No users found.</p>
-        ) : filtered.map(u => (
-          <div key={u.id} className="flex items-center gap-3 px-4 py-3 bg-ink hover:bg-white/2 transition-colors">
-            <div className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 border text-xs font-bold ${ROLE_COLORS[u.role] || ROLE_COLORS.student}`}>
-              {(u.name || u.id).charAt(0).toUpperCase()}
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-snow text-xs font-medium truncate">{u.name}</p>
-              <p className="text-dim text-xs font-mono truncate">{u.email}</p>
-            </div>
-            <span className={`text-xs font-mono px-2 py-0.5 rounded-lg border ${ROLE_COLORS[u.role] || ROLE_COLORS.student}`}>
-              {u.role}
-            </span>
-            {/* Student analytics button */}
-            {u.role === "student" && (
-              <button onClick={() => setSelectedStudent(u)} title="View course analytics"
-                className="text-dim hover:text-azure-400 transition-colors shrink-0">
-                <BarChart3 size={13} />
+        ) : filtered.map(u => {
+          const uid = u.id || u._id;
+          return (
+            <div key={uid} className="flex items-center gap-3 px-4 py-3 bg-ink hover:bg-white/2 transition-colors">
+              <div className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 border text-xs font-bold ${ROLE_COLORS[u.role] || ROLE_COLORS.student}`}>
+                {(u.name || uid).charAt(0).toUpperCase()}
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-snow text-xs font-medium truncate">{u.name}</p>
+                <p className="text-dim text-xs font-mono truncate">{u.email}</p>
+              </div>
+              <span className={`text-xs font-mono px-2 py-0.5 rounded-lg border ${ROLE_COLORS[u.role] || ROLE_COLORS.student}`}>
+                {u.role}
+              </span>
+              {(u.role === "student" || u.role === "ta") && (
+                <button onClick={() => setSelectedStudent(u)} title="View course analytics"
+                  className="text-dim hover:text-azure-400 transition-colors shrink-0">
+                  <BarChart3 size={13} />
+                </button>
+              )}
+              <button onClick={() => handleDelete(u)} disabled={deleting === uid}
+                className="text-dim hover:text-rose-400 transition-colors shrink-0 disabled:opacity-40">
+                {deleting === uid ? <Spinner size={13} /> : <Trash2 size={13} />}
               </button>
-            )}
-            <button onClick={() => handleDelete(u)} disabled={deleting === u.id}
-              className="text-dim hover:text-rose-400 transition-colors shrink-0 disabled:opacity-40">
-              {deleting === u.id ? <Spinner size={13} /> : <Trash2 size={13} />}
-            </button>
-          </div>
-        ))}
+            </div>
+          );
+        })}
       </div>
       <p className="text-dim text-xs font-mono">{filtered.length} user{filtered.length !== 1 ? "s" : ""} shown</p>
 
@@ -471,35 +526,36 @@ function UsersPanel() {
   );
 }
 
-// ── Sessions panel ────────────────────────────────────────────────────────────
+// ── Sessions Panel ────────────────────────────────────────────────────────────
 function SessionsPanel() {
   const [sessions, setSessions] = useState([]);
   const [loading,  setLoading]  = useState(true);
 
   useEffect(() => {
-    import("../api/client").then(({ default: API }) =>
-      API.get("/admin/sessions")
-        .then(r => setSessions(r.data))
-        .catch(() => {})
-        .finally(() => setLoading(false))
-    );
+    API.get("/admin/sessions")
+      .then(r => setSessions(r.data))
+      .catch(() => {})
+      .finally(() => setLoading(false));
   }, []);
 
   if (loading) return <div className="flex justify-center py-10"><Spinner size={20} /></div>;
-  if (sessions.length === 0) return <p className="text-soft text-sm text-center py-6">No sessions yet.</p>;
+  if (!sessions.length) return <p className="text-soft text-sm text-center py-6">No sessions yet.</p>;
 
   return (
     <div className="space-y-2 max-h-72 overflow-y-auto">
       {sessions.slice(0, 50).map(s => (
         <div key={s.sessionUID} className="flex items-center gap-3 px-4 py-2.5 rounded-xl bg-ink border border-edge">
-          <Activity size={13} className="text-azure-400 shrink-0" />
+          <Activity size={13} className={s.active ? "text-jade-400" : "text-dim"} />
           <div className="flex-1 min-w-0">
             <p className="text-snow text-xs font-mono truncate">{s.sessionUID}</p>
             <p className="text-dim text-xs truncate">Course: {s.course_id}</p>
           </div>
-          <div className="text-right shrink-0">
+          <div className="text-right shrink-0 space-y-0.5">
             <p className="text-soft text-xs">{formatIST(s.timestamp)}</p>
-            <Badge label={s.method} variant={s.method === "BLE" ? "ble" : s.method === "QRCode" ? "qr" : "manual"} />
+            <div className="flex items-center gap-1 justify-end">
+              <Badge label={s.method} variant={s.method === "BLE" ? "ble" : s.method === "QRCode" ? "qr" : "manual"} />
+              {s.active && <Badge label="LIVE" variant="live" />}
+            </div>
           </div>
         </div>
       ))}
@@ -511,10 +567,10 @@ function SessionsPanel() {
 function ActionCard({ icon: Icon, title, subtitle, color, children }) {
   const [open, setOpen] = useState(false);
   const colorMap = {
-    azure:  { bg: "bg-azure-500/15",  border: "border-azure-500/20",  text: "text-azure-400"  },
-    jade:   { bg: "bg-jade-500/15",   border: "border-jade-500/20",   text: "text-jade-400"   },
-    violet: { bg: "bg-violet-500/15", border: "border-violet-500/20", text: "text-violet-400" },
-    amber:  { bg: "bg-amber-500/15",  border: "border-amber-500/20",  text: "text-amber-400"  },
+    azure:  { bg:"bg-azure-500/15",  border:"border-azure-500/20",  text:"text-azure-400"  },
+    jade:   { bg:"bg-jade-500/15",   border:"border-jade-500/20",   text:"text-jade-400"   },
+    violet: { bg:"bg-violet-500/15", border:"border-violet-500/20", text:"text-violet-400" },
+    amber:  { bg:"bg-amber-500/15",  border:"border-amber-500/20",  text:"text-amber-400"  },
   };
   const c = colorMap[color] || colorMap.azure;
   return (
@@ -528,7 +584,7 @@ function ActionCard({ icon: Icon, title, subtitle, color, children }) {
           <p className="text-snow text-xs font-medium">{title}</p>
           <p className="text-dim text-xs mt-0.5">{subtitle}</p>
         </div>
-        {open ? <ChevronUp size={14} className="text-dim shrink-0" /> : <ChevronDown size={14} className="text-dim shrink-0" />}
+        {open ? <ChevronUp size={14} className="text-dim" /> : <ChevronDown size={14} className="text-dim" />}
       </button>
       {open && (
         <div className="px-4 pb-4 pt-1 border-t border-edge animate-slide-up">
@@ -553,9 +609,7 @@ export default function AdminDashboard() {
         setError(null);
       } catch {
         setError("Could not load stats — check backend connection.");
-      } finally {
-        setLoading(false);
-      }
+      } finally { setLoading(false); }
     }
     load();
     const t = setInterval(load, 15_000);
@@ -565,15 +619,14 @@ export default function AdminDashboard() {
   if (loading) return <div className="flex items-center justify-center h-64"><Spinner size={28} /></div>;
 
   const services = [
-    { name: "Node API",          status: !error, detail: "http://localhost:4040" },
-    { name: "MongoDB",           status: !error, detail: "mongoose / attendance" },
-    { name: "BLE Beacon Server", status: true,   detail: "GET /getMinor"         },
-    { name: "JWT Auth",          status: true,   detail: "HS256"                 },
+    { name: "Node API",  status: !error, detail: "http://localhost:4040" },
+    { name: "MongoDB",   status: !error, detail: "mongoose / attendance" },
+    { name: "BLE Svc",  status: true,   detail: process.env.REACT_APP_BLE_URL || "http://localhost:8000" },
+    { name: "JWT Auth",  status: true,   detail: "HS256" },
   ];
 
   return (
     <div className="space-y-8">
-      {/* Header */}
       <div className="animate-slide-up flex items-center gap-3">
         <div className="w-10 h-10 rounded-xl bg-rose-500/15 flex items-center justify-center border border-rose-500/20">
           <Shield size={18} className="text-rose-400" />
@@ -585,22 +638,21 @@ export default function AdminDashboard() {
       </div>
 
       {error && (
-        <div className="flex items-start gap-3 bg-amber-500/10 border border-amber-500/20 rounded-2xl px-5 py-4 animate-slide-up">
+        <div className="flex items-start gap-3 bg-amber-500/10 border border-amber-500/20 rounded-2xl px-5 py-4">
           <AlertTriangle size={16} className="text-amber-400 shrink-0 mt-0.5" />
           <p className="text-amber-300 text-sm">{error}</p>
         </div>
       )}
 
-      {/* Stats strip */}
       {stats && (
-        <div className="grid grid-cols-3 lg:grid-cols-6 gap-4 animate-slide-up" style={{ animationDelay: "80ms" }}>
+        <div className="grid grid-cols-3 lg:grid-cols-6 gap-4 animate-slide-up">
           {[
-            { label: "Students",   value: stats.students,      color: "text-jade-400"   },
-            { label: "Professors", value: stats.professors,    color: "text-violet-400" },
-            { label: "Courses",    value: stats.courses,       color: "text-azure-400"  },
-            { label: "Sessions",   value: stats.sessions,      color: "text-amber-400"  },
-            { label: "Enrollments",value: stats.enrollments,   color: "text-rose-400"   },
-            { label: "Att. Marks", value: stats.attendance,    color: "text-snow"       },
+            { label: "Students",      value: stats.students,    color: "text-jade-400"   },
+            { label: "Professors",    value: stats.professors,  color: "text-violet-400" },
+            { label: "Courses",       value: stats.courses,     color: "text-azure-400"  },
+            { label: "Active Sessions", value: stats.sessions,    color: "text-amber-400"  },
+            { label: "Enrollments",   value: stats.enrollments, color: "text-rose-400"   },
+            { label: "Att. Marks",    value: stats.attendance,  color: "text-snow"       },
           ].map((s, i) => (
             <div key={i} className="bg-card border border-edge rounded-2xl p-4 text-center">
               <p className="text-soft text-xs uppercase tracking-widest mb-1">{s.label}</p>
@@ -610,8 +662,7 @@ export default function AdminDashboard() {
         </div>
       )}
 
-      {/* Service health */}
-      <div className="bg-card border border-edge rounded-2xl p-6 animate-slide-up" style={{ animationDelay: "160ms" }}>
+      <div className="bg-card border border-edge rounded-2xl p-6 animate-slide-up">
         <h2 className="text-snow font-semibold text-sm mb-4">Service Health</h2>
         <div className="space-y-3">
           {services.map((svc, i) => (
@@ -627,17 +678,16 @@ export default function AdminDashboard() {
         </div>
       </div>
 
-      {/* Action panels */}
-      <div className="animate-slide-up space-y-3" style={{ animationDelay: "240ms" }}>
+      <div className="animate-slide-up space-y-3">
         <h2 className="text-snow font-semibold text-sm">Management</h2>
 
         <ActionCard icon={BookOpen} title="Courses & Enrollment"
-          subtitle="Create courses, manage enrollments, view per-course students" color="azure">
+          subtitle="Create courses, manage enrollment and TAs" color="azure">
           <CoursesPanel />
         </ActionCard>
 
         <ActionCard icon={Users} title="Users"
-          subtitle="Add/remove students and professors · view student course analytics" color="jade">
+          subtitle="Add/remove students and professors · view attendance analytics" color="jade">
           <UsersPanel />
         </ActionCard>
 
@@ -651,10 +701,8 @@ export default function AdminDashboard() {
           <div className="bg-ink border border-edge rounded-xl p-4 font-mono text-xs space-y-2">
             {[
               "Server logs are generated by the Docker container.",
-              "To view live logs, run in your terminal:",
-              "  docker logs -f attendance-backend",
-              "Or tail the last 100 lines:",
-              "  docker logs --tail 100 attendance-backend",
+              "To view live logs:", "  docker logs -f attendance-backend",
+              "Tail last 100 lines:", "  docker logs --tail 100 attendance-backend",
             ].map((line, i) => (
               <p key={i} className={line.startsWith("  ") ? "text-jade-400 pl-4" : "text-soft"}>{line}</p>
             ))}
@@ -662,12 +710,12 @@ export default function AdminDashboard() {
         </ActionCard>
       </div>
 
-      <div className="flex items-center gap-2 px-1 animate-slide-up" style={{ animationDelay: "300ms" }}>
-        <CheckCircle2 size={13} className="text-jade-400 shrink-0" />
+      {/* <div className="flex items-center gap-2 px-1 animate-slide-up">
+        <CheckCircle2 size={13} className="text-jade-400" />
         <p className="text-dim text-xs font-mono">
-          All timestamps stored as UTC · displayed in IST (UTC+5:30) throughout the portal
+          All timestamps stored as UTC · displayed in IST (UTC+5:30)
         </p>
-      </div>
+      </div> */}
     </div>
   );
 }

@@ -1,3 +1,17 @@
+/**
+ * attendance.js
+ *
+ * FIX: students who marked in a session at 17:30 should NOT appear in an
+ * ongoing session now. The /attendance/:sessionId endpoint only returns
+ * records that belong to THAT specific session. The "present now" confusion
+ * arose because CourseView was polling attendance on the WRONG session ID
+ * (it was using the primary active session which happened to match a past
+ * session's lectureUID).  This is fully correct — each session has its own
+ * attendance records. No change needed here except ensuring we filter by
+ * the sessionUID, which we already do.
+ *
+ * ALSO: markAttendance now validates that the session is still active.
+ */
 const express    = require('express');
 const Attendance = require('../models/Attendance');
 const Session    = require('../models/Session');
@@ -18,7 +32,6 @@ async function requireActiveSession(sessionId) {
 }
 
 // ── POST /markAttendance  (student or BLE device) ────────────────────────────
-// Body: { session_id, student_id, method }
 router.post('/markAttendance', authenticate, async (req, res, next) => {
   try {
     const { session_id, student_id, method } = req.body;
@@ -34,7 +47,11 @@ router.post('/markAttendance', authenticate, async (req, res, next) => {
     const session = await requireActiveSession(session_id);
 
     // Verify student is enrolled
-    const enrolled = await Enrollment.findOne({ student: student_id, course: session.course, status: 'Active' }).lean();
+    const enrolled = await Enrollment.findOne({
+      student: student_id,
+      course:  session.course,
+      status:  'Active',
+    }).lean();
     if (!enrolled) return res.status(403).json({ error: 'Student not enrolled in this course' });
 
     const rec = await Attendance.findOneAndUpdate(
@@ -43,20 +60,19 @@ router.post('/markAttendance', authenticate, async (req, res, next) => {
       { upsert: true, new: true }
     );
 
-    // Update bucket cache async
-    updateBucketForStudent(student_id, session.course, session.lectureUID, method).catch(console.error);
+    // Update bucket async — fire and forget
+    updateBucketForStudent(student_id).catch(console.error);
 
     res.status(201).json({ message: 'Attendance marked', record: rec });
   } catch (err) { next(err); }
 });
 
-// ── POST /manualAttendance  (prof/admin for single student) ──────────────────
-router.post('/manualAttendance', authenticate, authorize('prof','admin'), async (req, res, next) => {
+// ── POST /manualAttendance  (prof/admin/ta for single student) ───────────────
+router.post('/manualAttendance', authenticate, authorize('prof','admin','ta'), async (req, res, next) => {
   try {
     const { session_id, student_id } = req.body;
     if (!session_id || !student_id) return res.status(400).json({ error: 'session_id and student_id required' });
 
-    // session existence but NOT necessarily active (manual = override)
     const session = await Session.findOne({ sessionUID: session_id }).lean();
     if (!session) return res.status(404).json({ error: 'Session not found' });
 
@@ -66,14 +82,13 @@ router.post('/manualAttendance', authenticate, authorize('prof','admin'), async 
       { upsert: true, new: true }
     );
 
-    updateBucketForStudent(student_id, session.course, session.lectureUID, 'Manual').catch(console.error);
+    updateBucketForStudent(student_id).catch(console.error);
     res.json({ message: 'Manual attendance recorded', record: rec });
   } catch (err) { next(err); }
 });
 
 // ── POST /manualAttendance/bulk ───────────────────────────────────────────────
-// Body: { session_id, student_ids: [] }
-router.post('/manualAttendance/bulk', authenticate, authorize('prof','admin'), async (req, res, next) => {
+router.post('/manualAttendance/bulk', authenticate, authorize('prof','admin','ta'), async (req, res, next) => {
   try {
     const { session_id, student_ids } = req.body;
     if (!session_id || !Array.isArray(student_ids)) {
@@ -92,9 +107,8 @@ router.post('/manualAttendance/bulk', authenticate, authorize('prof','admin'), a
     }));
     const result = await Attendance.bulkWrite(ops);
 
-    // Async bucket updates
     for (const sid of student_ids) {
-      updateBucketForStudent(sid, session.course, session.lectureUID, 'Manual').catch(console.error);
+      updateBucketForStudent(sid).catch(console.error);
     }
 
     res.json({ message: 'Bulk attendance recorded', upserted: result.upsertedCount, modified: result.modifiedCount });
@@ -102,17 +116,21 @@ router.post('/manualAttendance/bulk', authenticate, authorize('prof','admin'), a
 });
 
 // ── GET /attendance/:sessionId ────────────────────────────────────────────────
+// Returns ONLY records for the specified session (not all sessions in a lecture).
+// This is intentionally session-scoped so the CourseView "Attendance Log"
+// shows who has checked into the current session, not all past attendees.
 router.get('/attendance/:sessionId', authenticate, async (req, res, next) => {
   try {
     const records = await Attendance.find({ sessionUID: req.params.sessionId }).lean();
 
     const studentIds = [...new Set(records.map(r => r.student))];
     const students   = await Student.find({ _id: { $in: studentIds } }).select('-password').lean();
-    const sMap       = Object.fromEntries(students.map(s => [s._id, s]));
+    const sMap       = Object.fromEntries(students.map(s => [String(s._id), s]));
 
     res.json(records.map(r => ({
       ...r,
-      studentName: sMap[r.student]?.name,
+      student_id:   r.student,
+      studentName:  sMap[r.student]?.name,
       studentEmail: sMap[r.student]?.email,
     })));
   } catch (err) { next(err); }

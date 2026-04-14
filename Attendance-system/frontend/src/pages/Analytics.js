@@ -5,11 +5,11 @@ import {
 } from "../api/client";
 import { useAuth } from "../context/AuthContext";
 import {
-  BarChart, Bar, Cell, XAxis, YAxis, Tooltip, ResponsiveContainer, LineChart, Line,
+  BarChart, Bar, Cell, XAxis, YAxis, Tooltip, ResponsiveContainer,
 } from "recharts";
 import {
   BarChart3, TrendingUp, Users, Activity, AlertTriangle,
-  GraduationCap, ChevronDown, ChevronUp, BookOpen,
+  GraduationCap, ChevronDown, ChevronUp, BookOpen, Calendar,
 } from "lucide-react";
 import { StatCard, ProgressBar, AttendancePct, Spinner, Empty } from "../components/UI";
 
@@ -28,7 +28,6 @@ const DarkTooltip = ({ active, payload, label }) => {
 
 const COURSE_COLORS = ["bg-azure-500","bg-jade-500","bg-violet-500","bg-amber-500","bg-rose-500"];
 const BAR_COLORS    = ["#3B82F6","#34D399","#8B5CF6","#FBBF24","#FB7185"];
-const DAY_LABELS    = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 
 // ── Lecture timeline for one course ──────────────────────────────────────────
 function LectureTimeline({ courseId }) {
@@ -44,9 +43,10 @@ function LectureTimeline({ courseId }) {
   }, [courseId]);
 
   if (loading) return <div className="flex justify-center py-4"><Spinner size={16} /></div>;
-  if (!data)   return null;
+  if (!data) return null;
 
-  const held = data.lectureStats?.filter(l => l.hasSession) || [];
+  // Use sessionCount > 0 to determine if lecture was held
+  const held = (data.lectureStats || []).filter(l => l.sessionCount > 0);
   if (held.length === 0) return (
     <p className="text-dim text-xs py-3 text-center">No lectures held yet.</p>
   );
@@ -67,10 +67,13 @@ function LectureTimeline({ courseId }) {
                   timeZone: "Asia/Kolkata", day: "2-digit", month: "short",
                 })}
               </span>
+              <span className="text-dim text-xs font-mono w-12 shrink-0">
+                {l.sessionCount} sess
+              </span>
               <div className="flex-1">
                 <ProgressBar value={l.attendancePct} max={100} />
               </div>
-              <span className="text-soft text-xs font-mono w-20 text-right shrink-0">
+              <span className="text-soft text-xs font-mono w-24 text-right shrink-0">
                 {l.attended}/{l.enrolled} ({l.attendancePct}%)
               </span>
             </div>
@@ -82,7 +85,7 @@ function LectureTimeline({ courseId }) {
 }
 
 // ── Per-course student table ──────────────────────────────────────────────────
-function CourseStudentTable({ courseId, courseName }) {
+function CourseStudentTable({ courseId }) {
   const [data,    setData]    = useState(null);
   const [loading, setLoading] = useState(true);
 
@@ -99,7 +102,7 @@ function CourseStudentTable({ courseId, courseName }) {
   return (
     <div className="space-y-2">
       <p className="text-soft text-xs font-mono">
-        {data.enrolled} enrolled · {data.totalLectures} lectures held
+        {data.enrolled} enrolled
       </p>
       <div className="divide-y divide-edge rounded-xl border border-edge overflow-hidden max-h-64 overflow-y-auto">
         {data.studentStats.length === 0 ? (
@@ -143,7 +146,6 @@ function AtRiskCard({ profId }) {
         <h2 className="text-snow font-semibold text-sm">At-Risk Students</h2>
       </div>
       <p className="text-soft text-xs mb-4">Below 75% lecture attendance in any course</p>
-
       {loading ? (
         <div className="flex items-center justify-center h-32"><Spinner size={20} /></div>
       ) : data.length === 0 ? (
@@ -182,18 +184,13 @@ function AtRiskCard({ profId }) {
 // ── Prof / TA Analytics view ──────────────────────────────────────────────────
 function ProfAnalyticsView({ user }) {
   const [loading,  setLoading]  = useState(true);
-  const [courses,  setCourses]  = useState([]);
   const [profData, setProfData] = useState([]);
   const [expanded, setExpanded] = useState(null);
 
   useEffect(() => {
     async function load() {
       try {
-        const [cRes, pRes] = await Promise.all([
-          getCourses(user.user_id),
-          getProfAnalytics(user.user_id),
-        ]);
-        setCourses(cRes.data);
+        const pRes = await getProfAnalytics(user.user_id);
         setProfData(pRes.data);
       } finally {
         setLoading(false);
@@ -204,26 +201,49 @@ function ProfAnalyticsView({ user }) {
 
   if (loading) return <div className="flex items-center justify-center h-64"><Spinner size={28} /></div>;
 
-  const totalSessions   = profData.reduce((s, c) => s + c.sessions, 0);
-  const totalAttendance = profData.reduce((s, c) => s + c.attendance, 0);
-  const totalLectures   = profData.reduce((s, c) => s + c.lectures, 0);
+  /**
+   * Backend returns per course:
+   *   lectures     = course.lectures.length  (total PLANNED lectures from slot map)
+   *   lecturesHeld = distinct lectures that had ≥1 session
+   *   sessions     = total DB session rows (one per method per lecture)
+   *   attendance   = total marks across all sessions
+   *
+   * What we show:
+   *   "Lectures Held"   = sum of lecturesHeld  (lectures that actually happened)
+   *   "Avg Marks/Lecture" = attendance / lecturesHeld
+   */
+  const totalLecturesHeld = profData.reduce((s, c) => s + (c.lecturesHeld ?? c.sessions ?? 0), 0);
+  const totalAttendance   = profData.reduce((s, c) => s + (c.attendance ?? 0), 0);
+  const avgMarksPerLecture = totalLecturesHeld > 0
+    ? (totalAttendance / totalLecturesHeld).toFixed(1)
+    : "0.0";
 
   const barData = profData.map(c => ({
-    name:    c.course_name.length > 12 ? c.course_name.slice(0, 12) + "…" : c.course_name,
-    avg_pct: c.avg_pct,
-    sessions: c.sessions,
-    lectures: c.lectures,
+    name:         c.course_name.length > 12 ? c.course_name.slice(0, 12) + "…" : c.course_name,
+    avg_pct:      c.avg_pct ?? 0,
+    lecturesHeld: c.lecturesHeld ?? 0,
   }));
 
   return (
     <div className="space-y-8">
-      {/* Summary stats */}
+      {/* Summary stats — correct labels */}
       <div className="grid grid-cols-3 gap-4">
-        <StatCard label="Lectures Held"    value={totalSessions}   icon={Activity}   color="azure" delay={0}   />
-        <StatCard label="Total Lectures"   value={totalLectures}   icon={BookOpen}   color="violet" delay={80} />
-        <StatCard label="Avg Marks/Lecture"
-          value={(totalSessions > 0 ? totalAttendance / totalSessions : 0).toFixed(1)}
-          icon={TrendingUp} color="jade" delay={160} />
+        <StatCard
+          label="Lectures Held"
+          value={totalLecturesHeld}
+          icon={Activity}
+          color="azure"
+          delay={0}
+          sub="lectures that had at least one session"
+        />
+        <StatCard
+          label="Avg Marks / Lecture"
+          value={avgMarksPerLecture}
+          icon={TrendingUp}
+          color="jade"
+          delay={160}
+          sub="attendance marks per lecture held"
+        />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -232,7 +252,7 @@ function ProfAnalyticsView({ user }) {
           <div className="flex items-center justify-between mb-6">
             <div>
               <h2 className="text-snow font-semibold text-sm">Avg Attendance % per Course</h2>
-              <p className="text-soft text-xs mt-0.5">Lecture-based: attended / enrolled</p>
+              <p className="text-soft text-xs mt-0.5">Lecture-based: fully-attended lectures / enrolled</p>
             </div>
             <BarChart3 size={16} className="text-dim" />
           </div>
@@ -252,17 +272,15 @@ function ProfAnalyticsView({ user }) {
             </ResponsiveContainer>
           )}
         </div>
-
-        {/* At-risk */}
         <AtRiskCard profId={user.user_id} />
       </div>
 
-      {/* Per-course breakdown with student table drill-down */}
+      {/* Per-course breakdown */}
       {profData.length > 0 && (
         <div className="bg-card border border-edge rounded-2xl overflow-hidden animate-slide-up">
           <div className="px-5 py-4 border-b border-edge">
             <h2 className="text-snow font-semibold text-sm">Course Breakdown</h2>
-            <p className="text-soft text-xs mt-0.5">Click a course to see per-student and per-lecture stats</p>
+            <p className="text-soft text-xs mt-0.5">Click to see per-student and per-lecture stats</p>
           </div>
           <div className="divide-y divide-edge">
             {profData.map((c, i) => (
@@ -275,23 +293,21 @@ function ProfAnalyticsView({ user }) {
                   <div className="flex-1 min-w-0">
                     <p className="text-snow text-sm font-medium">{c.course_name}</p>
                     <p className="text-soft text-xs mt-0.5">
-                      {c.sessions} lectures held · {c.lectures} total · {c.enrolled} enrolled
+                      {c.lecturesHeld ?? 0} held · {c.enrolled} enrolled
                     </p>
                   </div>
                   <div className="w-28 shrink-0">
-                    <ProgressBar value={c.avg_pct} max={100} />
+                    <ProgressBar value={c.avg_pct ?? 0} max={100} />
                   </div>
-                  <AttendancePct value={c.avg_pct} />
+                  <AttendancePct value={c.avg_pct ?? 0} />
                   {expanded === c.course_id
                     ? <ChevronUp size={14} className="text-dim shrink-0" />
                     : <ChevronDown size={14} className="text-dim shrink-0" />}
                 </button>
-
-                {/* Expanded: lecture timeline + student table */}
                 {expanded === c.course_id && (
                   <div className="px-5 pb-5 space-y-4 border-t border-edge bg-ink animate-slide-up">
                     <LectureTimeline courseId={c.course_id} />
-                    <CourseStudentTable courseId={c.course_id} courseName={c.course_name} />
+                    <CourseStudentTable courseId={c.course_id} />
                   </div>
                 )}
               </div>
@@ -305,8 +321,8 @@ function ProfAnalyticsView({ user }) {
 
 // ── Admin Analytics view ──────────────────────────────────────────────────────
 function AdminAnalyticsView() {
-  const [data,    setData]    = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [data,     setData]     = useState(null);
+  const [loading,  setLoading]  = useState(true);
   const [expanded, setExpanded] = useState(null);
 
   useEffect(() => {
@@ -327,23 +343,19 @@ function AdminAnalyticsView() {
   const { totals, profs } = data;
   const allCourses = profs.flatMap(p => p.courses.map(c => ({
     name:    c.name.length > 12 ? c.name.slice(0, 12) + "…" : c.name,
-    avg_pct: c.avg_pct,
-    prof:    p.prof_name.split(" ").slice(-1)[0],
-    sessions: c.sessions,
-    enrolled: c.enrolled,
+    avg_pct: c.avg_pct ?? 0,
   })));
 
   return (
     <div className="space-y-8">
-      {/* Totals */}
       <div className="grid grid-cols-3 lg:grid-cols-6 gap-4">
         {[
-          { label: "Sessions",   value: totals.sessions,   color: "text-azure-400"  },
-          { label: "Att. Marks", value: totals.attendance, color: "text-jade-400"   },
-          { label: "Avg/Session",value: totals.avg,        color: "text-violet-400" },
-          { label: "Students",   value: totals.students,   color: "text-amber-400"  },
-          { label: "Courses",    value: totals.courses,    color: "text-rose-400"   },
-          { label: "Professors", value: totals.profs,      color: "text-snow"       },
+          { label: "Total Sessions", value: totals.sessions, color: "text-jade-400"   },
+          { label: "Att. Marks",      value: totals.attendance,                        color: "text-azure-400"  },
+          { label: "Avg/Session",     value: totals.avg,                               color: "text-violet-400" },
+          { label: "Students",        value: totals.students,                          color: "text-amber-400"  },
+          { label: "Courses",         value: totals.courses,                           color: "text-rose-400"   },
+          { label: "Professors",      value: totals.profs,                             color: "text-snow"       },
         ].map((s, i) => (
           <div key={i} className="bg-card border border-edge rounded-2xl p-4 text-center animate-slide-up"
             style={{ animationDelay: `${i * 40}ms` }}>
@@ -353,8 +365,7 @@ function AdminAnalyticsView() {
         ))}
       </div>
 
-      {/* Bar chart */}
-      <div className="bg-card border border-edge rounded-2xl p-6 animate-slide-up" style={{ animationDelay: "80ms" }}>
+      <div className="bg-card border border-edge rounded-2xl p-6 animate-slide-up">
         <div className="flex items-center justify-between mb-6">
           <div>
             <h2 className="text-snow font-semibold text-sm">Avg Attendance % per Course</h2>
@@ -379,7 +390,6 @@ function AdminAnalyticsView() {
         )}
       </div>
 
-      {/* Per-professor breakdown with course drill-down */}
       {profs.map((prof, pi) => (
         <div key={prof.prof_id} className="bg-card border border-edge rounded-2xl overflow-hidden animate-slide-up"
           style={{ animationDelay: `${160 + pi * 60}ms` }}>
@@ -405,21 +415,22 @@ function AdminAnalyticsView() {
                     <div className={`w-2 h-8 rounded-full shrink-0 ${COURSE_COLORS[ci % COURSE_COLORS.length]}`} />
                     <div className="flex-1 min-w-0">
                       <p className="text-snow text-sm font-medium">{c.name}</p>
-                      <p className="text-soft text-xs mt-0.5">{c.sessions} held · {c.enrolled} enrolled</p>
+                      <p className="text-soft text-xs mt-0.5">
+                        {c.lecturesHeld ?? c.sessions ?? 0} held · {c.enrolled} enrolled
+                      </p>
                     </div>
                     <div className="w-28 shrink-0">
-                      <ProgressBar value={c.avg_pct} max={100} />
+                      <ProgressBar value={c.avg_pct ?? 0} max={100} />
                     </div>
-                    <AttendancePct value={c.avg_pct} />
+                    <AttendancePct value={c.avg_pct ?? 0} />
                     {expanded === `${prof.prof_id}-${c.course_id}`
                       ? <ChevronUp size={14} className="text-dim shrink-0" />
                       : <ChevronDown size={14} className="text-dim shrink-0" />}
                   </button>
-
                   {expanded === `${prof.prof_id}-${c.course_id}` && (
                     <div className="px-5 pb-5 border-t border-edge bg-ink animate-slide-up space-y-4">
                       <LectureTimeline courseId={c.course_id} />
-                      <CourseStudentTable courseId={c.course_id} courseName={c.name} />
+                      <CourseStudentTable courseId={c.course_id} />
                     </div>
                   )}
                 </div>
@@ -435,7 +446,6 @@ function AdminAnalyticsView() {
 // ── Root ──────────────────────────────────────────────────────────────────────
 export default function Analytics() {
   const { user } = useAuth();
-
   return (
     <div className="space-y-8">
       <div className="animate-slide-up">

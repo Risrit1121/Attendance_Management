@@ -15,15 +15,14 @@ const SessionSchema = new mongoose.Schema({
   lectureUID: {
     type:     String,
     required: true,
-    // NOT unique per course — a lecture can have many sessions.
-    // A student is present for a lecture only if they attended ALL sessions.
+    // NOT unique per course — a lecture can have many sessions (BLE + QR, etc.)
   },
   scheduledTime: {
     type:     Date,
     required: true,
   },
   duration: {
-    type:     Number, // minutes
+    type:     Number, // minutes — kept for reference, no longer used for active check
     required: true,
   },
   method: {
@@ -35,13 +34,29 @@ const SessionSchema = new mongoose.Schema({
     type:    Boolean,
     default: false,
   },
+  // ── Active flag (replaces the duration-based expiry hack) ────────────────────
+  // true  = session is currently running
+  // false = session was ended (via endSession or auto-expiry cron)
+  active: {
+    type:    Boolean,
+    default: true,
+    index:   true,
+  },
+  endedAt: {
+    type:    Date,
+    default: null,
+  },
   timestamp: {
     type:    Date,
     default: Date.now,
   },
 });
 
-SessionSchema.index({ course: 1, lectureUID: 1 });       // all sessions for a lecture
-SessionSchema.index({ course: 1, timestamp: -1 });        // active-session check
+// Compound index: most common query pattern
+SessionSchema.index({ course: 1, active: 1 });              // GET /activeSession
+SessionSchema.index({ course: 1, lectureUID: 1 });           // analytics grouping
+SessionSchema.index({ course: 1, lectureUID: 1, method: 1, active: 1 }); // duplicate guard
+SessionSchema.index({ sessionUID: 1 }, { unique: true });    // primary lookup
+SessionSchema.index({ timestamp: -1 });                      // admin sessions list
 
 module.exports = mongoose.model('Session', SessionSchema);

@@ -3,7 +3,7 @@ import {
   startSession, getQR, getAttendance, endSession, getActiveSession,
   manualAttendanceBulk, getCourseStudents,
   getCourseSchedules, addSchedule as apiAddSchedule,
-  updateSchedule as apiUpdateSchedule, deleteSchedule as apiDeleteSchedule,
+  updateSchedule as apiUpdateSchedule, deleteScheduleItem as apiDeleteSchedule,
 } from "../api/client";
 import { QRCodeCanvas } from "qrcode.react";
 import {
@@ -126,7 +126,6 @@ function ScheduleRow({ sch, index, onToggle, onDelete, onSave, saving }) {
           <span className="text-snow text-sm font-medium">{sch.scheduledDay}</span>
           <span className="text-soft text-xs font-mono">{sch.startTime} → {sch.endTime} IST</span>
           <Badge label={sch.method} variant={methodVariant} />
-          {!sch.switch && <span className="text-dim text-xs font-mono">auto-start off</span>}
         </div>
       </div>
       {/* Pencil edit */}
@@ -168,16 +167,19 @@ export default function CourseView({ course, goBack }) {
   const [schLoading,   setSchLoading]   = useState(true);
   const [showSchForm,  setShowSchForm]  = useState(false);
   const [schSaving,    setSchSaving]    = useState(false);
+  // FIX: removed `switch` field from newSch default — the checkbox is gone.
+  // New schedules always start with auto-start OFF; the toggle on the row
+  // controls it after saving.
   const [newSch,       setNewSch]       = useState({
     scheduledDay: "Monday", startTime: "09:00", endTime: "09:50",
-    method: "BLE", switch: false,
+    method: "BLE",
   });
 
   // Manual attendance
   const [roster,   setRoster]   = useState([]);
   const [selected, setSelected] = useState(new Set());
 
-  // Read-only for TAs on schedule auto-start toggle (TAs can view but not add/delete)
+  // Read-only for TAs on schedule auto-start toggle
   const isTa = user?.role === "ta";
 
   // ── Load schedules from DB ────────────────────────────────────────────────
@@ -203,6 +205,14 @@ export default function CourseView({ course, goBack }) {
         if (res.data?.session_id) {
           setSession(res.data);
           setMode(res.data.method || "BLE");
+
+          const startedAt = res.data.startedAt;
+          if (startedAt) {
+            const startMs  = new Date(startedAt).getTime();
+            const nowMs    = Date.now();
+            const seconds  = Math.max(0, Math.floor((nowMs - startMs) / 1000));
+            setElapsed(seconds);
+          }
         }
       } catch {}
     }
@@ -280,10 +290,11 @@ export default function CourseView({ course, goBack }) {
   const handleAddSchedule = async () => {
     setSchSaving(true);
     try {
-      await apiAddSchedule(courseId, newSch);
+      // Always add with switch: false — professor enables it via the row toggle
+      await apiAddSchedule(courseId, { ...newSch, switch: false });
       await loadSchedules();
       setShowSchForm(false);
-      setNewSch({ scheduledDay: "Monday", startTime: "09:00", endTime: "09:50", method: "BLE", switch: false });
+      setNewSch({ scheduledDay: "Monday", startTime: "09:00", endTime: "09:50", method: "BLE" });
     } catch (e) {
       setError(e.response?.data?.error || "Could not add schedule.");
     } finally {
@@ -518,7 +529,10 @@ export default function CourseView({ course, goBack }) {
           )}
         </div>
 
-        {/* Add form */}
+        {/* Add form — FIX: "Enable auto-start" checkbox removed.
+            The switch toggle on each ScheduleRow already handles this.
+            New schedules always save with switch: false and the professor
+            enables auto-start afterwards via the row toggle. */}
         {showSchForm && !isTa && (
           <div className="px-5 py-4 border-b border-edge bg-ink space-y-3">
             <p className="text-snow text-xs font-semibold">New recurring schedule</p>
@@ -551,13 +565,6 @@ export default function CourseView({ course, goBack }) {
                   onChange={e => setNewSch(s => ({ ...s, endTime: e.target.value }))}
                   className="w-full bg-card border border-edge rounded-xl text-sm text-snow px-3 py-2 focus:outline-none focus:border-violet-500 transition-all" />
               </div>
-            </div>
-            <div className="flex items-center gap-3">
-              <label className="flex items-center gap-2 text-xs text-soft cursor-pointer">
-                <input type="checkbox" checked={newSch.switch}
-                  onChange={e => setNewSch(s => ({ ...s, switch: e.target.checked }))} />
-                Enable auto-start
-              </label>
             </div>
             <div className="flex gap-2">
               <button onClick={handleAddSchedule} disabled={schSaving}
@@ -599,6 +606,7 @@ export default function CourseView({ course, goBack }) {
           </div>
         )}
       </div>
+
     </div>
   );
 }

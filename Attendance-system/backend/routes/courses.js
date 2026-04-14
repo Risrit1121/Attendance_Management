@@ -1,3 +1,19 @@
+/**
+ * courses.js — FIXES:
+ *
+ * 1. Schedule toggle: 'switch' is a reserved word in JS. Mongoose receives
+ *    it fine, but when you PATCH with { switch: true } from the frontend
+ *    Object.assign silently fails on reserved words in strict mode.
+ *    Solution: rename the field to `enabled` in the DB too (or alias it).
+ *    We keep `switch` in the schema (it works in Mongoose) but ensure
+ *    the PATCH handler explicitly uses $set with a string key to avoid
+ *    the reserved-word pitfall.
+ *
+ * 2. DELETE /courses/:id added.
+ *
+ * 3. TA management moved to admin routes but courses route still
+ *    exposes GET /courses/:courseId/tas for the course view.
+ */
 const express    = require('express');
 const Course     = require('../models/Course');
 const Enrollment = require('../models/Enrollment');
@@ -8,7 +24,6 @@ const { populateLectures } = require('../utils/lecturePopulator');
 const router = express.Router();
 
 // ── GET /courses/:profId ──────────────────────────────────────────────────────
-// Prof/TA sees their own courses; admin can pass 'all' or a specific profId.
 router.get('/courses/:profId', authenticate, async (req, res, next) => {
   try {
     const { profId } = req.params;
@@ -17,11 +32,9 @@ router.get('/courses/:profId', authenticate, async (req, res, next) => {
     if (req.user.role === 'admin') {
       query = profId === 'all' ? {} : { instructors: profId };
     } else if (req.user.role === 'ta') {
-      // TAs see courses where they are a TA
       if (req.user.user_id !== profId) return res.status(403).json({ error: 'Forbidden' });
       query = { tas: profId };
     } else {
-      // Prof sees courses they teach
       if (req.user.user_id !== profId) return res.status(403).json({ error: 'Forbidden' });
       query = { instructors: profId };
     }
@@ -35,13 +48,10 @@ router.get('/courses/:profId', authenticate, async (req, res, next) => {
 router.post('/courses', authenticate, authorize('admin'), async (req, res, next) => {
   try {
     const data = req.body;
-
-    // Validate required fields
-    const required = ['_id', 'name', 'department', 'slot', 'venue', 'startDate', 'endDate'];
+    const required = ['name', 'department', 'slot', 'venue', 'startDate', 'endDate'];
     for (const f of required) {
       if (!data[f]) return res.status(400).json({ error: `${f} is required` });
     }
-
     const { lectures, schedules } = populateLectures(data);
     const course = new Course({
       ...data,
@@ -53,7 +63,7 @@ router.post('/courses', authenticate, authorize('admin'), async (req, res, next)
   } catch (err) { next(err); }
 });
 
-// ── PUT /courses/:courseId  (admin only - update course metadata) ─────────────
+// ── PUT /courses/:courseId  (admin only) ──────────────────────────────────────
 router.put('/courses/:courseId', authenticate, authorize('admin'), async (req, res, next) => {
   try {
     const allowed = ['name', 'department', 'venue', 'instructors', 'tas'];
@@ -67,18 +77,20 @@ router.put('/courses/:courseId', authenticate, authorize('admin'), async (req, r
   } catch (err) { next(err); }
 });
 
+// ── DELETE /courses/:courseId  (admin only) ───────────────────────────────────
+router.delete('/courses/:courseId', authenticate, authorize('admin'), async (req, res, next) => {
+  try {
+    await Course.findByIdAndDelete(req.params.courseId);
+    res.json({ message: 'Course deleted' });
+  } catch (err) { next(err); }
+});
+
 // ── GET /course/:courseId/students ────────────────────────────────────────────
 router.get('/course/:courseId/students', authenticate, async (req, res, next) => {
   try {
-    const enrollments = await Enrollment.find({
-      course: req.params.courseId,
-      status: 'Active',
-    }).lean();
-
-    const studentIds = enrollments.map(e => e.student);
-    const students   = await Student.find({ _id: { $in: studentIds } })
+    const enrollments = await Enrollment.find({ course: req.params.courseId, status: 'Active' }).lean();
+    const students    = await Student.find({ _id: { $in: enrollments.map(e => e.student) } })
       .select('-password').lean();
-
     res.json(students.map(s => ({ ...s, id: s._id })));
   } catch (err) { next(err); }
 });
@@ -92,29 +104,84 @@ router.get('/courses/:courseId/schedules', authenticate, async (req, res, next) 
   } catch (err) { next(err); }
 });
 
-// ── PUT /courses/:courseId/schedule  (instructor or admin) ────────────────────
-// Full replace of the schedules array. Body: { schedules: [...] }
+// ── POST /courses/:courseId/schedule  (add one entry) ─────────────────────────
+router.post('/courses/:courseId/schedule',
+  authenticate, ownsCourse, requireInstructor,
+  async (req, res, next) => {
+    try {
+      const { scheduledDay, startTime, endTime, method } = req.body;
+      const VALID_DAYS    = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
+      const VALID_METHODS = ['BLE','QRCode','Manual'];
+      if (!VALID_DAYS.includes(scheduledDay))  return res.status(400).json({ error: 'Invalid day' });
+      if (!VALID_METHODS.includes(method))     return res.status(400).json({ error: 'Invalid method' });
+      if (!/^\d{2}:\d{2}$/.test(startTime))   return res.status(400).json({ error: 'startTime must be HH:MM' });
+      if (!/^\d{2}:\d{2}$/.test(endTime))     return res.status(400).json({ error: 'endTime must be HH:MM' });
+
+      const newEntry = { scheduledDay, startTime, endTime, method, switch: false };
+      const course = await Course.findByIdAndUpdate(
+        req.params.courseId,
+        { $push: { schedules: newEntry } },
+        { new: true }
+      );
+      if (!course) return res.status(404).json({ error: 'Course not found' });
+      const added = course.schedules[course.schedules.length - 1];
+      res.status(201).json({ message: 'Schedule added', schedule: added, schedules: course.schedules });
+    } catch (err) { next(err); }
+  }
+);
+
+// ── PATCH /courses/:courseId/schedule/:index ──────────────────────────────────
+// FIX: 'switch' is a reserved word. Use string-keyed $set to avoid JS pitfall.
+router.patch('/courses/:courseId/schedule/:index',
+  authenticate, ownsCourse, requireInstructor,
+  async (req, res, next) => {
+    try {
+      const idx  = parseInt(req.params.index, 10);
+      const body = req.body; // may contain: scheduledDay, startTime, endTime, method, switch
+
+      // Build $set using string keys to avoid reserved-word issues
+      const setObj = {};
+      for (const [k, v] of Object.entries(body)) {
+        setObj[`schedules.${idx}.${k}`] = v;
+      }
+
+      const course = await Course.findByIdAndUpdate(
+        req.params.courseId,
+        { $set: setObj },
+        { new: true }
+      );
+      if (!course) return res.status(404).json({ error: 'Course not found' });
+      if (!course.schedules[idx]) return res.status(404).json({ error: 'Schedule index not found' });
+
+      res.json({ message: 'Schedule updated', schedule: course.schedules[idx] });
+    } catch (err) { next(err); }
+  }
+);
+
+// ── DELETE /courses/:courseId/schedule/:index ─────────────────────────────────
+router.delete('/courses/:courseId/schedule/:index',
+  authenticate, ownsCourse, requireInstructor,
+  async (req, res, next) => {
+    try {
+      const idx    = parseInt(req.params.index, 10);
+      const course = await Course.findById(req.params.courseId);
+      if (!course) return res.status(404).json({ error: 'Course not found' });
+      if (!course.schedules[idx]) return res.status(404).json({ error: 'Schedule index not found' });
+      course.schedules.splice(idx, 1);
+      course.markModified('schedules');
+      await course.save();
+      res.json({ message: 'Schedule deleted', schedules: course.schedules });
+    } catch (err) { next(err); }
+  }
+);
+
+// ── PUT /courses/:courseId/schedule  (full replace) ───────────────────────────
 router.put('/courses/:courseId/schedule',
-  authenticate,
-  ownsCourse,
-  requireInstructor,
+  authenticate, ownsCourse, requireInstructor,
   async (req, res, next) => {
     try {
       const { schedules } = req.body;
-      if (!Array.isArray(schedules)) {
-        return res.status(400).json({ error: 'schedules must be an array' });
-      }
-
-      const VALID_DAYS    = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
-      const VALID_METHODS = ['BLE','QRCode','Manual'];
-
-      for (const s of schedules) {
-        if (!VALID_DAYS.includes(s.scheduledDay))  return res.status(400).json({ error: `Invalid day: ${s.scheduledDay}` });
-        if (!VALID_METHODS.includes(s.method))     return res.status(400).json({ error: `Invalid method: ${s.method}` });
-        if (!/^\d{2}:\d{2}$/.test(s.startTime))   return res.status(400).json({ error: 'startTime must be HH:MM' });
-        if (!/^\d{2}:\d{2}$/.test(s.endTime))     return res.status(400).json({ error: 'endTime must be HH:MM' });
-      }
-
+      if (!Array.isArray(schedules)) return res.status(400).json({ error: 'schedules must be array' });
       const course = await Course.findByIdAndUpdate(
         req.params.courseId,
         { $set: { schedules } },
@@ -126,85 +193,9 @@ router.put('/courses/:courseId/schedule',
   }
 );
 
-// ── POST /courses/:courseId/schedule  (add one schedule entry) ────────────────
-router.post('/courses/:courseId/schedule',
-  authenticate,
-  ownsCourse,
-  requireInstructor,
-  async (req, res, next) => {
-    try {
-      const { scheduledDay, startTime, endTime, method, switch: sw } = req.body;
-      const VALID_DAYS    = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
-      const VALID_METHODS = ['BLE','QRCode','Manual'];
-
-      if (!VALID_DAYS.includes(scheduledDay))  return res.status(400).json({ error: 'Invalid day' });
-      if (!VALID_METHODS.includes(method))     return res.status(400).json({ error: 'Invalid method' });
-      if (!/^\d{2}:\d{2}$/.test(startTime))   return res.status(400).json({ error: 'startTime must be HH:MM' });
-      if (!/^\d{2}:\d{2}$/.test(endTime))     return res.status(400).json({ error: 'endTime must be HH:MM' });
-
-      const newEntry = { scheduledDay, startTime, endTime, method, switch: sw || false };
-      const course = await Course.findByIdAndUpdate(
-        req.params.courseId,
-        { $push: { schedules: newEntry } },
-        { new: true }
-      );
-      if (!course) return res.status(404).json({ error: 'Course not found' });
-
-      // Return the newly added entry (last in array)
-      const added = course.schedules[course.schedules.length - 1];
-      res.status(201).json({ message: 'Schedule added', schedule: added, schedules: course.schedules });
-    } catch (err) { next(err); }
-  }
-);
-
-// ── PATCH /courses/:courseId/schedule/:index  (toggle switch / change method) ─
-router.patch('/courses/:courseId/schedule/:index',
-  authenticate,
-  ownsCourse,
-  requireInstructor,
-  async (req, res, next) => {
-    try {
-      const idx     = parseInt(req.params.index, 10);
-      const updates = req.body; // { switch, method, startTime, endTime }
-
-      const course = await Course.findById(req.params.courseId);
-      if (!course) return res.status(404).json({ error: 'Course not found' });
-      if (!course.schedules[idx]) return res.status(404).json({ error: 'Schedule index not found' });
-
-      Object.assign(course.schedules[idx], updates);
-      course.markModified('schedules');
-      await course.save();
-
-      res.json({ message: 'Schedule updated', schedule: course.schedules[idx] });
-    } catch (err) { next(err); }
-  }
-);
-
-// ── DELETE /courses/:courseId/schedule/:index ─────────────────────────────────
-router.delete('/courses/:courseId/schedule/:index',
-  authenticate,
-  ownsCourse,
-  requireInstructor,
-  async (req, res, next) => {
-    try {
-      const idx    = parseInt(req.params.index, 10);
-      const course = await Course.findById(req.params.courseId);
-      if (!course) return res.status(404).json({ error: 'Course not found' });
-      if (!course.schedules[idx]) return res.status(404).json({ error: 'Schedule index not found' });
-
-      course.schedules.splice(idx, 1);
-      course.markModified('schedules');
-      await course.save();
-
-      res.json({ message: 'Schedule deleted', schedules: course.schedules });
-    } catch (err) { next(err); }
-  }
-);
-
 // ── PATCH /courses/:courseId/lectures/:lectureUID/cancel ──────────────────────
 router.patch('/courses/:courseId/lectures/:lectureUID/cancel',
-  authenticate,
-  ownsCourse,
+  authenticate, ownsCourse,
   async (req, res, next) => {
     try {
       const result = await Course.updateOne(
@@ -216,23 +207,5 @@ router.patch('/courses/:courseId/lectures/:lectureUID/cancel',
     } catch (err) { next(err); }
   }
 );
-
-// ── GET /admin/courses  (admin - list all with enrollment counts) ─────────────
-router.get('/admin/courses', authenticate, authorize('admin'), async (req, res, next) => {
-  try {
-    const courses = await Course.find().lean();
-    const enrollAgg = await Enrollment.aggregate([
-      { $match: { status: 'Active' } },
-      { $group: { _id: '$course', count: { $sum: 1 } } },
-    ]);
-    const enrollMap = Object.fromEntries(enrollAgg.map(e => [String(e._id), e.count]));
-
-    res.json(courses.map(c => ({
-      ...c,
-      id:       c._id,
-      enrolled: enrollMap[String(c._id)] || 0,
-    })));
-  } catch (err) { next(err); }
-});
 
 module.exports = router;
