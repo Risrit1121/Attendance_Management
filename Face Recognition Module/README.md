@@ -1,107 +1,72 @@
 # Face Recognition Microservice
 
-A lightweight face recognition microservice built with FastAPI for **face enrollment** and **verification** using deep learning embeddings.
+A high-performance, containerized Face Recognition API built with FastAPI, InsightFace (MobileFaceNet), and MongoDB Atlas. Designed for robust face enrollment and real-time verification.
 
-This service is designed to be plugged into a larger backend (e.g., Node.js / main API server).
+## 🚀 Key Features
 
----
-
-## 🚀 Overview
-
-This microservice provides:
-
-- Face Enrollment (store user embeddings)
-- Face Verification (match live face against stored embeddings)
-- Multi-frame processing for robustness
-- Cosine similarity-based matching
+- **Parallel Inference:** Processes multiple face frames simultaneously using `ThreadPoolExecutor` for fast response times.
+- **Cloud Database:** Integrated with MongoDB Atlas for persistent, instant identity lookups via indexed `user_id`s.
+- **Docker-Ready:** Fully containerized for seamless deployment without dependency or C++ compilation conflicts.
+- **Robust Matching:** Averages embeddings across multiple frames and verifies identities using Cosine Similarity.
 
 ---
 
-## 🧠 How It Works
+## ⚙️ Quick Start (Docker Deployment)
 
-### Enrollment
+The easiest and safest way to deploy this microservice in production is via Docker Compose.
 
-1. Client sends multiple face frames
-2. Embeddings are generated for each frame
-3. All embeddings are averaged
-4. Final embedding is normalized and stored
+### 1. Configure Environment
 
-### Verification
+Create a `.env` file in the root directory and add your MongoDB Atlas connection string:
 
-1. Client sends multiple face frames
-2. Embeddings are generated
-3. Averaged into a single vector
-4. Compared with stored embeddings using cosine similarity
-5. Decision made based on threshold (default: **0.50**)
-
----
-
-## 🏗️ Project Structure
-
-```
-face-service/
-├── main.py                  # FastAPI entry point
-├── routes/
-│   ├── enroll.py
-│   └── verify.py
-├── services/
-│   └── face_service.py      # Core pipeline logic
-├── face_module/             # Your existing ML code (unchanged)
-│   ├── embedding/
-│   ├── verification/
-│   └── database/
+```env
+MONGO_URI="mongodb+srv://<username>:<password>@<cluster>.mongodb.net/?retryWrites=true&w=majority"
 ```
 
----
+### 2. Build and Run
 
-## ⚙️ Setup
-
-### 1. Install dependencies
+Execute the following command on your deployment server:
 
 ```bash
-pip install -r requirements.txt
+docker-compose up -d --build
 ```
 
-Or manually:
-
-```bash
-pip install fastapi uvicorn insightface onnxruntime numpy opencv-python
-```
+The service will be available at `http://localhost:8000`, running 4 parallel worker processes.
 
 ---
 
-### 2. Run the service
+## 💻 Local Development Setup
 
-```bash
-uvicorn main:app --reload
-```
+If you need to run the server locally (without Docker):
 
-Service runs at:
-
-```
-http://localhost:8000
-```
+1. **Install dependencies** (Python 3.10 recommended):
+   ```bash
+   pip install -r requirements.txt
+   ```
+2. **Setup environment:** Ensure your `.env` file exists with your `MONGO_URI`.
+3. **Start the server:**
+   ```bash
+   uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4
+   ```
 
 ---
 
 ## 📡 API Endpoints
 
----
-
 ### 🔹 1. Enroll Face
 
 **POST** `/enroll-face/`
 
-#### Request
+**Request Payload:**
 
 ```json
 {
-  "user_id": "user_123",
-  "frames": ["base64_img1", "base64_img2", "..."]
+  "user_id": "student_123",
+  "frames": ["base64_string_1", "base64_string_2", "..."]
 }
 ```
 
-#### Response
+**Response:**
 
 ```json
 {
@@ -110,134 +75,42 @@ http://localhost:8000
 }
 ```
 
-#### Possible Status:
-
-- `enrolled`
-- `no_face`
-
 ---
 
 ### 🔹 2. Verify Face
 
 **POST** `/verify-face/`
 
-#### Request
+**Request Payload:**
 
 ```json
 {
-  "user_id": "user_123",
-  "frames": ["base64_img1", "base64_img2", "..."]
+  "user_id": "student_123",
+  "frames": ["base64_string_1", "base64_string_2", "base64_string_3"],
+  "challenges": ["blink", "turn_left"]
 }
 ```
 
-#### Response
+**Response:**
 
 ```json
 {
   "status": "verified",
-  "similarity": 0.78
+  "similarity": 0.82
 }
 ```
 
-#### Possible Status:
+---
 
-- `verified`
-- `rejected`
-- `no_face`
+## 📂 Project Architecture
+
+- `main.py`: FastAPI application entry point
+- `routes/`: Endpoint definitions (`/enroll-face`, `/verify-face`)
+- `services/face_service.py`: Core pipeline managing parallel image decoding, liveness checks, and neural network inference
+- `face_module/`: Machine learning engine (InsightFace, head pose calculations, MongoDB interactions)
 
 ---
 
-## 🔁 Data Flow
+## Author
 
-```
-Client
-  ↓
-FastAPI Endpoint
-  ↓
-Service Layer
-  ↓
-Decode base64 → Image (RGB)
-  ↓
-MobileFaceNet → Embeddings
-  ↓
-Average embeddings
-  ↓
-Database lookup
-  ↓
-Cosine similarity
-  ↓
-Response
-```
-
----
-
-## ⚠️ Important Notes
-
-- Input images must contain **clear human faces**
-- Frames should be:
-  - 5–15 images per request
-  - different angles preferred
-
-- Images are expected as **base64 encoded strings**
-- Internally converted to **RGB numpy arrays**
-
----
-
-## 📊 Performance
-
-| Component       | Time (approx) |
-| --------------- | ------------- |
-| Image decoding  | 2–8 ms        |
-| Embedding model | 20–80 ms      |
-| DB lookup       | <5 ms         |
-| Total request   | ~100–300 ms   |
-
----
-
-## 🧠 Model Details
-
-- Model: InsightFace (MobileFaceNet)
-- Output: 512-D embedding
-- Metric: Cosine similarity
-
----
-
-## 🔐 Security (Optional)
-
-- Embeddings can be encrypted before storage
-- Liveness detection can be integrated (not included here)
-
----
-
-## 🔌 Integration
-
-This service is meant to be used like:
-
-```
-Frontend / Mobile App
-        ↓
-Main Backend (Node / API)
-        ↓
-Face Recognition Microservice (this)
-```
-
----
-
-## ❌ What This Service Does NOT Handle
-
-- User authentication
-- Session management
-- Liveness detection (currently disabled)
-- Frontend interaction
-
----
-
-## 📌 Summary
-
-This is a **clean, production-ready face recognition microservice** that:
-
-- Keeps ML logic isolated
-- Provides simple APIs
-- Is easy to scale and integrate
-
----
+- **Srikrishna Reddy** - [ES22BTECH11006](https://github.com/NaniReddyCh)
