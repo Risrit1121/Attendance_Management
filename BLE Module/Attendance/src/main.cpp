@@ -67,18 +67,35 @@ uint16_t fetchMinor() {
   if (WiFi.status() == WL_CONNECTED) {
 
     HTTPClient http;
-    String requestURL = serverURL + "?major=" + String(major);
 
-    Serial.println(requestURL);
+    http.begin(serverURL);
+    http.addHeader("Content-Type", "application/json");
 
-    http.begin(requestURL);
-    int httpCode = http.GET();
+    // Send JSON body
+    String payload = "{\"major_id\":" + String(major) + "}";
+
+    Serial.println("POST: " + payload);
+
+    int httpCode = http.POST(payload);
 
     if (httpCode == 200) {
-      String payload = http.getString();
-      Serial.println("Minor: " + payload);
-      http.end();
-      return payload.toInt();
+      String response = http.getString();
+      Serial.println("Response: " + response);
+
+      // Extract minor
+      int keyIndex = response.indexOf("\"minor\":\"");
+
+      if (keyIndex != -1) {
+        int start = keyIndex + 9; // length of "minor":" 
+        int end = response.indexOf("\"", start);
+
+        String minorStr = response.substring(start, end);
+
+        Serial.println("Parsed minor: " + minorStr);
+
+        http.end();
+        return minorStr.toInt();
+      }
     }
 
     http.end();
@@ -143,21 +160,40 @@ void startBeacon(uint16_t major, uint16_t minor) {
 
     NimBLEAdvertisementData advData;
     std::string payload = createBeaconData(major, minor);
+
     advData.setManufacturerData(payload);
     advData.setFlags(0x06);  // LE General Discoverable + BR/EDR Not Supported
 
-    // Setting intervals BEFORE setting data
-    pAdvertising->setMinInterval(160);  // 160 * 0.625ms = 100ms
-    pAdvertising->setMaxInterval(320);  // 320 * 0.625ms = 200ms
+    // 🔥 Set intervals BEFORE setting data
+    pAdvertising->setMinInterval(160);  // 100ms
+    pAdvertising->setMaxInterval(320);  // 200ms
 
     pAdvertising->setAdvertisementData(advData);
 
-    // Disable scan response by setting empty scan response data
+    // Disable scan response
     NimBLEAdvertisementData emptyScanRsp;
     pAdvertising->setScanResponseData(emptyScanRsp);
 
     pAdvertising->start();
-    Serial.println("Beacon started at 100-200ms interval");
+
+    // 🔍 DEBUG PRINTS
+    Serial.println("🚀 Beacon started");
+    Serial.print("Major: ");
+    Serial.println(major);
+
+    Serial.print("Minor: ");
+    Serial.println(minor);
+
+    Serial.println("Interval: 100–200 ms");
+
+    // 🔥 Optional: print payload hex (very useful)
+    // Serial.print("Payload (hex): ");
+    // for (size_t i = 0; i < payload.length(); i++) {
+    //     if ((uint8_t)payload[i] < 0x10) Serial.print("0");
+    //     Serial.print((uint8_t)payload[i], HEX);
+    //     Serial.print(" ");
+    // }
+    // Serial.println();
 }
 
 // ---------------- SETUP ----------------
@@ -184,6 +220,8 @@ void setup() {
 
     NimBLEDevice::init("ESP32 Beacon");
 
+    // 🔥 THIS IS THE FIX — forces a random address
+    // Android 12+ blocks static public MACs (EC:64:...) from non-system apps
     NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_RANDOM);
 
     pAdvertising = NimBLEDevice::getAdvertising();

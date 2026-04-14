@@ -5,9 +5,9 @@ const { activeMinors, classMap } = require("../../utils/cache");
 // 🔹 Generate Minor
 exports.generateMinor = async (req, res) => {
   try {
-    const { major_id } = req.body;
+    const major_id = String(req.body.major_id);
 
-    if (!major_id) {
+    if (major_id === undefined || major_id === null) {
       return res.status(400).json({ error: "major_id required" });
     }
 
@@ -57,7 +57,8 @@ exports.generateMinor = async (req, res) => {
 // 🔹 Validate (Multi-beacon + strongest RSSI)
 exports.validate = async (req, res) => {
   try {
-    const { class_id, beacons } = req.body;
+    const class_id = String(req.body.class_id);
+    const beacons = req.body.beacons;
 
     if (!class_id || !Array.isArray(beacons)) {
       return res.status(400).json({ valid: false });
@@ -70,10 +71,18 @@ exports.validate = async (req, res) => {
 
     // 1. Pick strongest valid beacon (O(n))
     for (const b of beacons) {
-      if (!classData.has(b.major)) continue;
+      if (!b.major || !b.minor || b.rssi === undefined) continue;
+
+      const major = String(b.major);
+
+      if (!classData.has(major)) continue;
 
       if (!best || b.rssi > best.rssi) {
-        best = b;
+        best = {
+          major,
+          minor: String(b.minor),
+          rssi: b.rssi
+        };
       }
     }
 
