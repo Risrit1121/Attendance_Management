@@ -32,7 +32,7 @@ pydantic>=1.8.0
 # Optional: HTTP Client for API testing
 requests>=2.26.0
 pymongo
-
+python-dotenv>=1.0.0
 # Optional: Development
 # Uncomment these for development purposes
 # pytest>=6.2.0

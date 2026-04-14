@@ -1,0 +1,11 @@
+version: '3.8'
+
+services:
+  face-api:
+    build: .
+    container_name: face_recognition_microservice
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env  # This securely injects your MongoDB Atlas URI
+    restart: always # If the server crashes or reboots, the app turns back on automatically
