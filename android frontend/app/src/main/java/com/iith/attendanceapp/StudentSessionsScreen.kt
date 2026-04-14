@@ -249,7 +249,7 @@ fun FaceCameraScreen(onSuccess: () -> Unit) {
 }
 
 // ── BLE Student Screen ────────────────────────────────────────────────────────
-private const val TARGET_UUID = "550e8400-e29b-41d4-a716-446655440000"
+private const val TARGET_UUID = "49495448-2d41-5454-454e-44414e434520"
 
 @Composable
 fun StudentBLEScreen(onSuccess: () -> Unit) {
@@ -259,11 +259,12 @@ fun StudentBLEScreen(onSuccess: () -> Unit) {
     var errorMsg  by remember { mutableStateOf<String?>(null) }
     val context   = LocalContext.current
 
-    // BLE permissions needed
+    // BLE permissions needed — ACCESS_FINE_LOCATION is required on ALL Android versions
     val blePermissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
         arrayOf(
             Manifest.permission.BLUETOOTH_SCAN,
-            Manifest.permission.BLUETOOTH_CONNECT
+            Manifest.permission.BLUETOOTH_CONNECT,
+            Manifest.permission.ACCESS_FINE_LOCATION
         )
     } else {
         arrayOf(
