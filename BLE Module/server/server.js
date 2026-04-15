@@ -1,12 +1,14 @@
 require("dotenv").config();
 const express = require("express");
 const connectDB = require("./src/config/db");
+const cors = require('cors');
 
 const ClassMapping = require("./src/models/ClassMapping");
 const { classMap, activeMinors } = require("./src/utils/cache");
 const os = require("os");
 
 const app = express();
+app.use(cors());
 
 // Middleware
 app.use(express.json());
