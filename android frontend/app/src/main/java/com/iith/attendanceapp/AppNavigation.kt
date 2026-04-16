@@ -1,30 +1,61 @@
 package com.iith.attendanceapp
 
 import androidx.compose.runtime.*
-import androidx.compose.ui.graphics.Color
-import androidx.navigation.compose.NavHost
-import androidx.navigation.compose.composable
-import androidx.navigation.compose.rememberNavController
 
 enum class UserRole { STUDENT, PROFESSOR, ADMIN }
 
+// Tracks what screen to show after role selection
+private sealed class AppScreen {
+    object RoleSelect : AppScreen()
+    data class Login(val role: UserRole) : AppScreen()
+    // Student-only: after login, choose enroll or enter
+    data class StudentEnroll(val userId: String) : AppScreen()
+    data class StudentHome(val userId: String) : AppScreen()
+    object ProfessorHome : AppScreen()
+    object AdminHome : AppScreen()
+}
+
 @Composable
 fun AttendanceApp() {
-    var isLoggedIn by remember { mutableStateOf(false) }
-    var role by remember { mutableStateOf(UserRole.STUDENT) }
+    var screen by remember { mutableStateOf<AppScreen>(AppScreen.RoleSelect) }
 
-    if (isLoggedIn) {
-        when (role) {
-            UserRole.STUDENT   -> StudentTabView(onLogout = { isLoggedIn = false })
-            UserRole.PROFESSOR -> ProfessorTabView(onLogout = { isLoggedIn = false })
-            UserRole.ADMIN     -> AdminTabView(onLogout = { isLoggedIn = false })
+    when (val s = screen) {
+        is AppScreen.RoleSelect -> RoleSelectionScreen { role ->
+            screen = AppScreen.Login(role)
         }
-    } else {
-        RoleSelectionScreen(
-            onContinue = { selectedRole ->
-                role = selectedRole
-                isLoggedIn = true
+
+        is AppScreen.Login -> LoginScreen(
+            role = s.role,
+            onEnter = { userId ->
+                screen = when (s.role) {
+                    UserRole.STUDENT   -> AppScreen.StudentHome(userId)
+                    UserRole.PROFESSOR -> AppScreen.ProfessorHome
+                    UserRole.ADMIN     -> AppScreen.AdminHome
+                }
+            },
+            onEnroll = { userId ->
+                // Only students enroll; professors/admins go straight in
+                screen = AppScreen.StudentEnroll(userId)
             }
+        )
+
+        is AppScreen.StudentEnroll -> FaceEnrollScreen(
+            userId = s.userId,
+            onDone = { screen = AppScreen.StudentHome(s.userId) },
+            onBack = { screen = AppScreen.Login(UserRole.STUDENT) }
+        )
+
+        is AppScreen.StudentHome -> StudentTabView(
+            userId   = s.userId,
+            onLogout = { screen = AppScreen.RoleSelect }
+        )
+
+        is AppScreen.ProfessorHome -> ProfessorTabView(
+            onLogout = { screen = AppScreen.RoleSelect }
+        )
+
+        is AppScreen.AdminHome -> AdminTabView(
+            onLogout = { screen = AppScreen.RoleSelect }
         )
     }
 }

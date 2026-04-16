@@ -16,10 +16,18 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 @Composable
-fun LoginScreen(role: UserRole, onLogin: () -> Unit) {
-    var email by remember { mutableStateOf("") }
+fun LoginScreen(
+    role: UserRole,
+    onEnter: (userId: String) -> Unit,
+    onEnroll: (userId: String) -> Unit
+) {
+    var email    by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
-    val roleLabel = if (role == UserRole.STUDENT) "Student" else "Professor"
+    val roleLabel = when (role) {
+        UserRole.STUDENT   -> "Student"
+        UserRole.PROFESSOR -> "Professor"
+        UserRole.ADMIN     -> "Admin"
+    }
 
     Column(
         modifier = Modifier
@@ -40,7 +48,7 @@ fun LoginScreen(role: UserRole, onLogin: () -> Unit) {
         OutlinedTextField(
             value = email,
             onValueChange = { email = it },
-            label = { Text("Email") },
+            label = { Text("Email / Roll Number") },
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(10.dp),
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
@@ -57,15 +65,40 @@ fun LoginScreen(role: UserRole, onLogin: () -> Unit) {
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
             singleLine = true
         )
-        Spacer(Modifier.height(20.dp))
+        Spacer(Modifier.height(24.dp))
 
-        Button(
-            onClick = onLogin,
-            modifier = Modifier.fillMaxWidth().height(52.dp),
-            shape = RoundedCornerShape(10.dp),
-            colors = ButtonDefaults.buttonColors(containerColor = GBlue)
-        ) {
-            Text("Sign In", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+        if (role == UserRole.STUDENT) {
+            // Students get two options
+            Button(
+                onClick = { onEnter(email.trim()) },
+                modifier = Modifier.fillMaxWidth().height(52.dp),
+                shape = RoundedCornerShape(10.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = GBlue)
+            ) {
+                Text("Enter", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            }
+            Spacer(Modifier.height(12.dp))
+            OutlinedButton(
+                onClick = { onEnroll(email.trim()) },
+                modifier = Modifier.fillMaxWidth().height(52.dp),
+                shape = RoundedCornerShape(10.dp)
+            ) {
+                Text("Enroll Face", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = GBlue)
+            }
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "First time? Tap \"Enroll Face\" to register your face.",
+                fontSize = 12.sp, color = Color.Gray
+            )
+        } else {
+            Button(
+                onClick = { onEnter(email.trim()) },
+                modifier = Modifier.fillMaxWidth().height(52.dp),
+                shape = RoundedCornerShape(10.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = GBlue)
+            ) {
+                Text("Sign In", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            }
         }
 
         Spacer(Modifier.weight(1f))

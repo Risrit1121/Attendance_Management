@@ -37,7 +37,7 @@ data class ActiveSession(val title: String, val subtitle: String, val mode: Stri
 
 // ── Sessions list ─────────────────────────────────────────────────────────────
 @Composable
-fun StudentSessionsScreen() {
+fun StudentSessionsScreen(userId: String) {
     val sessions = listOf(
         ActiveSession("Swift App Dev",    "Prof. Smith  •  Room 304", "QR Scan"),
         ActiveSession("Machine Learning", "Prof. Rao  •  Room 101",   "BLE Scan"),
@@ -45,7 +45,11 @@ fun StudentSessionsScreen() {
     var markingSession by remember { mutableStateOf<ActiveSession?>(null) }
 
     if (markingSession != null) {
-        MarkAttendanceFlow(session = markingSession!!, onDone = { markingSession = null })
+        MarkAttendanceFlow(
+            session = markingSession!!,
+            userId  = userId,
+            onDone  = { markingSession = null }
+        )
         return
     }
 
@@ -89,7 +93,7 @@ fun SessionCard(session: ActiveSession, onMark: () -> Unit) {
 
 // ── Mark Attendance Flow ──────────────────────────────────────────────────────
 @Composable
-fun MarkAttendanceFlow(session: ActiveSession, onDone: () -> Unit) {
+fun MarkAttendanceFlow(session: ActiveSession, userId: String, onDone: () -> Unit) {
     var step by remember { mutableStateOf(1) }
     val isBLE = session.mode == "BLE Scan"
 
@@ -121,7 +125,8 @@ fun MarkAttendanceFlow(session: ActiveSession, onDone: () -> Unit) {
                 QRCameraScreen(onSuccess = { step = 2 })
             }
         } else {
-            FaceCameraScreen(onSuccess = onDone)
+            // FaceCameraScreen is defined in FaceScreens.kt
+            FaceCameraScreen(userId = userId, onSuccess = onDone)
         }
     }
 }
@@ -161,7 +166,7 @@ fun WithCameraPermission(content: @Composable () -> Unit) {
     }
 }
 
-// ── Live camera preview ───────────────────────────────────────────────────────
+// ── Live camera preview (preview only, no capture) ───────────────────────────
 @Composable
 fun CameraPreview(useFrontCamera: Boolean, modifier: Modifier = Modifier) {
     val context = LocalContext.current
@@ -218,36 +223,6 @@ fun QRCameraScreen(onSuccess: () -> Unit) {
     }
 }
 
-// ── Face Camera Screen (front camera) ────────────────────────────────────────
-@Composable
-fun FaceCameraScreen(onSuccess: () -> Unit) {
-    WithCameraPermission {
-        Column(
-            modifier = Modifier.fillMaxSize().padding(horizontal = 24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Text("Face Verification", fontSize = 18.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(8.dp))
-            Text("Look straight at the camera", fontSize = 13.sp, color = Color.Gray)
-            Spacer(Modifier.height(16.dp))
-
-            CameraPreview(
-                useFrontCamera = true,
-                modifier = Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(16.dp))
-            )
-
-            Spacer(Modifier.height(24.dp))
-            // TODO: replace with actual capture + backend verification
-            Button(
-                onClick = onSuccess,
-                modifier = Modifier.fillMaxWidth().height(52.dp),
-                shape = RoundedCornerShape(10.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = GGreen)
-            ) { Text("Capture & Verify", fontWeight = FontWeight.Bold) }
-        }
-    }
-}
-
 // ── BLE Student Screen ────────────────────────────────────────────────────────
 private const val TARGET_UUID = "49495448-2d41-5454-454e-44414e434520"
 
@@ -259,7 +234,6 @@ fun StudentBLEScreen(onSuccess: () -> Unit) {
     var errorMsg  by remember { mutableStateOf<String?>(null) }
     val context   = LocalContext.current
 
-    // BLE permissions needed — ACCESS_FINE_LOCATION is required on ALL Android versions
     val blePermissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
         arrayOf(
             Manifest.permission.BLUETOOTH_SCAN,
@@ -267,9 +241,7 @@ fun StudentBLEScreen(onSuccess: () -> Unit) {
             Manifest.permission.ACCESS_FINE_LOCATION
         )
     } else {
-        arrayOf(
-            Manifest.permission.ACCESS_FINE_LOCATION
-        )
+        arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
     }
 
     var permissionsGranted by remember {
@@ -283,7 +255,6 @@ fun StudentBLEScreen(onSuccess: () -> Unit) {
         ActivityResultContracts.RequestMultiplePermissions()
     ) { grants -> permissionsGranted = grants.values.all { it } }
 
-    // Countdown timer
     LaunchedEffect(Unit) {
         while (timeLeft > 0) { delay(1000); timeLeft-- }
     }
@@ -309,7 +280,6 @@ fun StudentBLEScreen(onSuccess: () -> Unit) {
         )
         Spacer(Modifier.height(32.dp))
 
-        // Countdown ring
         Box(contentAlignment = Alignment.Center, modifier = Modifier.size(120.dp)) {
             CircularProgressIndicator(
                 progress = { timeLeft / 120f },
@@ -323,7 +293,6 @@ fun StudentBLEScreen(onSuccess: () -> Unit) {
 
         Spacer(Modifier.height(24.dp))
 
-        // Pulsing BLE dot
         Box(
             modifier = Modifier.size(70.dp).clip(CircleShape)
                 .background(GPurple.copy(alpha = if (scanning) alpha else 0.3f)),
@@ -332,7 +301,6 @@ fun StudentBLEScreen(onSuccess: () -> Unit) {
 
         Spacer(Modifier.height(24.dp))
 
-        // Scan button
         Button(
             onClick = {
                 if (!permissionsGranted) {
@@ -367,13 +335,11 @@ fun StudentBLEScreen(onSuccess: () -> Unit) {
             }
         }
 
-        // Error message
         if (errorMsg != null) {
             Spacer(Modifier.height(12.dp))
             Text(errorMsg!!, color = Color.Red, fontSize = 13.sp, textAlign = TextAlign.Center)
         }
 
-        // Results
         if (results.isNotEmpty()) {
             Spacer(Modifier.height(20.dp))
             Text("Beacon Detected", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = GPurple)
@@ -395,7 +361,6 @@ fun StudentBLEScreen(onSuccess: () -> Unit) {
                 Spacer(Modifier.height(8.dp))
             }
             Spacer(Modifier.height(16.dp))
-            // TODO: send results to backend for verification, then call onSuccess()
             Button(
                 onClick = onSuccess,
                 modifier = Modifier.fillMaxWidth().height(52.dp),

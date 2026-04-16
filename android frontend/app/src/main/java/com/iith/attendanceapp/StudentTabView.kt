@@ -15,7 +15,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun StudentTabView(onLogout: () -> Unit) {
+fun StudentTabView(userId: String, onLogout: () -> Unit) {
     val navController = rememberNavController()
     var showProfile by remember { mutableStateOf(false) }
     var currentTab by remember { mutableStateOf("dashboard") }
@@ -50,7 +50,7 @@ fun StudentTabView(onLogout: () -> Unit) {
     ) { padding ->
         NavHost(navController, startDestination = "dashboard", modifier = Modifier.padding(padding)) {
             composable("dashboard") { StudentDashboardScreen() }
-            composable("sessions")  { StudentSessionsScreen() }
+            composable("sessions")  { StudentSessionsScreen(userId = userId) }
         }
     }
 
