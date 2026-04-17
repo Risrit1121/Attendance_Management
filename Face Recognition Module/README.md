@@ -13,7 +13,7 @@ A high-performance, containerized Face Recognition API built with FastAPI, Insig
 
 ## ⚙️ Quick Start (Docker Deployment)
 
-The easiest and safest way to deploy this microservice in production is via Docker Compose.
+The easiest and safest way to deploy this microservic00e in production is via Docker Compose.
 
 ### 1. Configure Environment
 

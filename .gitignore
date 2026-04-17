@@ -1,3 +1,4 @@
 face_env
 __pycache__/
 .env
+embeddings.csv
