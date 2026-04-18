@@ -40,3 +40,4 @@ python-dotenv>=1.0.0
 # black>=21.0  (Code formatter)
 # flake8>=3.9.0  (Linter)
 # mypy>=0.910  (Type checker)
+certifi

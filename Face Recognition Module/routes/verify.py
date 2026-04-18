@@ -7,6 +7,5 @@ router = APIRouter()
 def verify(data: dict):
     return verify_face_service(
         user_id=data.get("user_id"),
-        frames=data.get("frames", []),
-        challenges=data.get("challenges", []) # Get the challenges from frontend
+        frames=data.get("frames", [])
     )

@@ -6,11 +6,9 @@ import concurrent.futures
 from face_module.embedding.mobilefacenet_embedder import MobileFaceNet
 from face_module.verification.verify_user import Verifier
 from face_module.database.db import get_user_embeddings, save_user_embedding
-from face_module.liveness.head_pose import HeadPose
 
 embedder = MobileFaceNet()
 verifier = Verifier()
-head_pose = HeadPose()
 
 def decode_frame(frame_b64: str):
     img_bytes = base64.b64decode(frame_b64)
@@ -23,68 +21,55 @@ def decode_frame(frame_b64: str):
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     return img
 
-def evaluate_challenge(expected_challenge: str, kps):
-    """
-    Evaluates if the keypoints match the expected challenge from the frontend.
-    InsightFace keypoints order: [0]: left_eye, [1]: right_eye, [2]: nose.
-    """
-    left_eye = kps[0]
-    right_eye = kps[1]
-    nose = kps[2]
-    
-    detected_pose = head_pose.detect_turn(nose, left_eye, right_eye)
-    
-    if expected_challenge == "turn_left" and detected_pose == "left":
-        return True
-    if expected_challenge == "turn_right" and detected_pose == "right":
-        return True
-        
-    return False
-
 # ---------------- VERIFY ----------------
-def verify_face_service(user_id: str, frames: list, challenges: list):
-    if len(frames) != 3 or len(challenges) != 2:
+def verify_face_service(user_id: str, frames: list):
+    if not frames:
         return {
             "status": "invalid_payload", 
-            "message": "Expected exactly 3 frames and 2 challenges"
+            "message": "Expected at least 1 frame"
         }
 
     # Decode all frames
-    img1 = decode_frame(frames[0]) 
-    img2 = decode_frame(frames[1]) 
-    img3 = decode_frame(frames[2]) 
+    valid_imgs = []
+    for f in frames:
+        img = decode_frame(f)
+        if img is not None:
+            valid_imgs.append(img)
 
-    if img1 is None or img2 is None or img3 is None:
+    if not valid_imgs:
         return {"status": "invalid_frames"}
 
-    # Process all 3 frames perfectly in parallel using thread pooling
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-        future1 = executor.submit(embedder.get_embedding_and_kps, img1)
-        future2 = executor.submit(embedder.get_embedding_and_kps, img2)
-        future3 = executor.submit(embedder.get_embedding_and_kps, img3)
+    embeddings = []
+    
+    # Process all frames in parallel. 
+    # This acts as a failsafe; you can pass 1, 3, or 5 frames.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(valid_imgs)) as executor:
+        # We only need the embedding now, not the keypoints
+        results = executor.map(embedder.get_embedding, valid_imgs)
+        
+        for emb in results:
+            if emb is not None:
+                embeddings.append(emb)
 
-        emb1, kps1 = future1.result()
-        emb2, kps2 = future2.result()
-        emb3, kps3 = future3.result()
-
-    if emb1 is None or emb2 is None or emb3 is None:
+    if not embeddings:
         return {"status": "no_face_detected_in_some_frames"}
-
-    # Evaluate Liveness Challenges
-    if not evaluate_challenge(challenges[1], kps3):
-        return {"status": "liveness_failed", "message": f"Failed to perform: {challenges[1]}"}
 
     # Database Identity Verification
     stored_embeddings = get_user_embeddings(user_id)
     if not stored_embeddings:
         return {"status": "user_not_found"}
 
-    similarity = verifier.verify(emb1, stored_embeddings)
+    # Compare all valid frames against the DB and find the best match
+    highest_similarity = 0.0
+    for candidate_emb in embeddings:
+        similarity = verifier.verify(candidate_emb, stored_embeddings)
+        if similarity > highest_similarity:
+            highest_similarity = similarity
+    print(highest_similarity)
+    if highest_similarity > 0.50:
+        return {"status": "verified", "similarity": float(highest_similarity)}
 
-    if similarity > 0.50:
-        return {"status": "verified", "similarity": float(similarity)}
-
-    return {"status": "rejected", "similarity": float(similarity)}
+    return {"status": "rejected", "similarity": float(highest_similarity)}
 
 
 # ---------------- ENROLL ----------------
@@ -113,8 +98,14 @@ def enroll_face_service(user_id: str, frames: list):
 
     # Normalize
     final_embedding = final_embedding / np.linalg.norm(final_embedding)
+    normalized_embeddings = [
+    emb / np.linalg.norm(emb) 
+    for emb in embeddings 
+    if np.linalg.norm(emb) != 0
+]
 
-    save_user_embedding(user_id, final_embedding)
+    # save_user_embedding(user_id, final_embedding)
+    save_user_embedding(user_id, normalized_embeddings)
 
     return {
         "status": "enrolled",
