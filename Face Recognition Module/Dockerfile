@@ -24,5 +24,5 @@ COPY . .
 # 7. Expose the port FastAPI runs on
 EXPOSE 8000
 
-# 8. The command to run your app (Using 4 workers for maximum speed!)
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]
+# 8. The command to run your app (Using 1 worker for simplicity!)
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
