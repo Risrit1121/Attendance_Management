@@ -39,6 +39,57 @@ const loadClassMappings = async () => {
 };
 
 
+app.use((req, res, next) => {
+  const start = Date.now();
+
+  // 📍 IP Address
+  const ip =
+    req.headers["x-forwarded-for"] ||
+    req.socket.remoteAddress ||
+    req.ip;
+
+  // 📱 Device / Browser info
+  const userAgent = req.headers["user-agent"];
+
+  // 🌍 Additional headers
+  const referer = req.headers["referer"] || "Direct";
+  const origin = req.headers["origin"] || "Unknown";
+
+  console.log("➡️ REQUEST");
+
+  console.log({
+    method: req.method,
+    url: req.originalUrl,
+    ip,
+    userAgent,
+    referer,
+    origin,
+  });
+
+  // 🔥 LOG BODY (IMPORTANT)
+  if (req.body && Object.keys(req.body).length > 0) {
+    console.log("📦 BODY:", req.body);
+  }
+
+  const originalJson = res.json;
+
+  res.json = function (data) {
+    const duration = Date.now() - start;
+
+    console.log("⬅️ RESPONSE");
+    console.log({
+      method: req.method,
+      url: req.originalUrl,
+      status: res.statusCode,
+      time: `${duration}ms`,
+      response: data,
+    });
+
+    return originalJson.call(this, data);
+  };
+
+  next();
+});
 // Routes
 const bleRoutes = require("./src/modules/ble/ble.routes");
 app.use("/ble", bleRoutes);
