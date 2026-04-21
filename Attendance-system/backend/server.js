@@ -21,11 +21,33 @@ const { startAllJobs } = require('./jobs');
 const app = express();
 
 app.set('trust proxy', 1);
+app.use(express.json());
+
+app.use((req, res, next) => {
+  const start = Date.now();
+
+  const ip =
+  (req.headers['x-forwarded-for'] || '').split(',')[0].trim() ||
+  req.socket.remoteAddress;
+
+  console.log(`➡️  ${req.method} ${req.originalUrl} | IP: ${ip}`);
+  if (req.originalUrl === '/login' && req.method === 'POST') {
+  console.log("📦 LOGIN BODY:", {
+    email: req.body.email,
+    password: req.body.password ? "***" : undefined
+  });
+}
+  res.on('finish', () => {
+    const time = Date.now() - start;
+    console.log(`⬅️  ${res.statusCode} ${req.method} ${req.originalUrl} (${time}ms)`);
+  });
+
+  next();
+});
 
 // ── Security ──────────────────────────────────────────────────────────────────
 app.use(helmet());
 app.use(cors({ origin: process.env.FRONTEND_URL || '*' }));
-app.use(express.json());
 
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20,
   message: { error: 'Too many login attempts' } });
@@ -54,6 +76,7 @@ app.use(limiter);
 //  /getMinor is shadowed.  This is intentional: the ESP32 always gets the
 //  microservice-backed minor.
 //
+
 app.use('/',          authRoutes);
 app.use('/',          courseRoutes);
 app.use('/',          sessionRoutes);

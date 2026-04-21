@@ -6,11 +6,42 @@ const API = axios.create({
 });
 
 // Token lives in sessionStorage (closes with browser tab)
-API.interceptors.request.use(cfg => {
+// API.interceptors.request.use(cfg => {
+//   const token = sessionStorage.getItem("diams_token");
+//   if (token) cfg.headers.Authorization = `Bearer ${token}`;
+//   return cfg;
+// });
+
+API.interceptors.request.use((config) => {
   const token = sessionStorage.getItem("diams_token");
-  if (token) cfg.headers.Authorization = `Bearer ${token}`;
-  return cfg;
+
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+
+  console.log("📤 API Request:", {
+    method: config.method.toUpperCase(),
+    url: config.url,
+    data: config.data
+  });
+
+  return config;
 });
+
+API.interceptors.response.use(
+  (response) => {
+    console.log("📥 API Response:", response.status, response.config.url);
+    return response;
+  },
+  (error) => {
+    console.log("❌ API Error:", {
+      status: error.response?.status,
+      url: error.config?.url,
+      message: error.message
+    });
+    return Promise.reject(error);
+  }
+);
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 export const login = (data) => API.post("/login", data);
