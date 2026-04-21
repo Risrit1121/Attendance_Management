@@ -90,6 +90,26 @@ async function resolveOrCreateLecture(courseId, providedLectureUID) {
     return { lectureUID: closest.lectureUID, scheduledTime: closest.scheduledTime, wasCreated: false };
   }
 
+  // Step 2b: no match within ±30 min, but check if ANY lecture exists on
+  // today's IST calendar date. Reuse the closest one rather than creating
+  // another ad-hoc duplicate for the same day.
+  const nowIST       = new Date(now.getTime() + IST_OFFSET_MS);
+  const todayDateStr = nowIST.toISOString().slice(0, 10); // "YYYY-MM-DD" in IST
+
+  const todayCandidate = course.lectures
+    .filter(l => !l.cancelled)
+    .filter(l => {
+      const lecIST = new Date(new Date(l.scheduledTime).getTime() + IST_OFFSET_MS);
+      return lecIST.toISOString().slice(0, 10) === todayDateStr;
+    })
+    .map(l => ({ ...l, diff: Math.abs(new Date(l.scheduledTime) - now) }))
+    .sort((a, b) => a.diff - b.diff)[0];
+
+  if (todayCandidate) {
+    return { lectureUID: todayCandidate.lectureUID, scheduledTime: todayCandidate.scheduledTime, wasCreated: false };
+  }
+
+
   // Step 3: no match — create exactly ONE ad-hoc lecture atomically.
   //
   // B1 FIX: snap scheduledTime to the floor of the current IST hour (not
