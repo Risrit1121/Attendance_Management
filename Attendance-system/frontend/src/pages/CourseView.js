@@ -210,27 +210,33 @@ function QrPanel({ session, qr, source }) {
   );
 }
 
-// ── Helpers: find today's lecture for this course ─────────────────────────────
-// Mirrors the backend's resolveOrCreateLecture step 2 logic exactly:
-// finds the closest non-cancelled lecture within ±30 min of now in IST.
-// Also accepts any lecture scheduled today (same IST calendar day) within
-// ±4 hours so the button is useful before/after the exact window.
-const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+// ── Helpers: find today's upcoming lectures for this course ───────────────────
+// A lecture is "upcoming/cancellable" if:
+//   - It is scheduled on today's IST calendar date, AND
+//   - Its scheduledTime has not yet passed (or is within a 15-min past grace
+//     window — so a prof can still cancel right after a class was supposed to
+//     start but hasn't had attendance marked yet).
+const IST_OFFSET_MS  = 5.5 * 60 * 60 * 1000;
+const CANCEL_GRACE_MS = 15 * 60 * 1000; // 15 min past the start time
 
 function toIST(utcDate) {
   return new Date(utcDate.getTime() + IST_OFFSET_MS);
 }
 
-function findTodaysLectures(lectures) {
+function findCancellableLectures(lectures) {
   if (!Array.isArray(lectures)) return [];
-  const nowIST    = toIST(new Date());
-  const todayDate = nowIST.toISOString().slice(0, 10); // YYYY-MM-DD in IST
+  const now        = Date.now();
+  const nowIST     = toIST(new Date(now));
+  const todayDate  = nowIST.toISOString().slice(0, 10); // YYYY-MM-DD in IST
 
   return lectures
     .filter(l => {
       const lecIST  = toIST(new Date(l.scheduledTime));
       const lecDate = lecIST.toISOString().slice(0, 10);
-      return lecDate === todayDate; // any lecture scheduled on today's IST date
+      if (lecDate !== todayDate) return false;
+      // Only show if the lecture hasn't well and truly passed
+      const lecMs = new Date(l.scheduledTime).getTime();
+      return now <= lecMs + CANCEL_GRACE_MS;
     })
     .sort((a, b) => new Date(a.scheduledTime) - new Date(b.scheduledTime));
 }
@@ -238,7 +244,7 @@ function findTodaysLectures(lectures) {
 // ── Cancel lecture banner ─────────────────────────────────────────────────────
 function CancelLectureBanner({ course, courseId, onCancelled }) {
   const lectures    = course.lectures || [];
-  const todayLecs   = findTodaysLectures(lectures);
+  const todayLecs   = findCancellableLectures(lectures);
   const [working,   setWorking]   = useState(false);
   const [confirm,   setConfirm]   = useState(false); // show confirm step
   const [targetLec, setTargetLec] = useState(null);  // lecture chosen for action
@@ -341,7 +347,7 @@ function CancelLectureBanner({ course, courseId, onCancelled }) {
 }
 
 // ── Schedule row with inline edit ─────────────────────────────────────────────
-function ScheduleRow({ sch, index, onToggle, onDelete, onSave, saving }) {
+function ScheduleRow({ sch, index, onToggle, onDelete, onSave, saving, error, clearError }) {
   const [editing, setEditing] = useState(false);
   const [form,    setForm]    = useState({
     scheduledDay: sch.scheduledDay,
@@ -353,7 +359,13 @@ function ScheduleRow({ sch, index, onToggle, onDelete, onSave, saving }) {
 
   const handleSave = async () => {
     await onSave(index, form);
+    // Only close if no error — parent sets error asynchronously
     setEditing(false);
+  };
+
+  const handleCancel = () => {
+    setEditing(false);
+    if (clearError) clearError();
   };
 
   if (editing) {
@@ -393,12 +405,18 @@ function ScheduleRow({ sch, index, onToggle, onDelete, onSave, saving }) {
               className="w-full bg-card border border-edge rounded-xl text-sm text-snow px-3 py-2 focus:outline-none focus:border-violet-500 transition-all" />
           </div>
         </div>
+        {error && (
+          <div className="flex items-center gap-2 bg-rose-500/10 border border-rose-500/20 rounded-xl px-3 py-2">
+            <AlertCircle size={12} className="text-rose-400 shrink-0" />
+            <p className="text-rose-300 text-xs">{error}</p>
+          </div>
+        )}
         <div className="flex gap-2">
           <button onClick={handleSave} disabled={saving}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-violet-500/15 text-violet-400 text-xs border border-violet-500/20 hover:bg-violet-500/25 transition-colors disabled:opacity-50">
             {saving ? <Spinner size={12} /> : <Save size={12} />} Save
           </button>
-          <button onClick={() => setEditing(false)}
+          <button onClick={handleCancel}
             className="px-3 py-1.5 rounded-lg bg-edge text-soft text-xs hover:text-snow transition-colors">
             Cancel
           </button>
@@ -463,6 +481,7 @@ export default function CourseView({ course, goBack }) {
   const [schLoading,   setSchLoading]   = useState(true);
   const [showSchForm,  setShowSchForm]  = useState(false);
   const [schSaving,    setSchSaving]    = useState(false);
+  const [schError,     setSchError]     = useState("");
   const [newSch,       setNewSch]       = useState({
     scheduledDay: "Monday", startTime: "09:00", endTime: "09:50",
     method: "BLE",
@@ -607,14 +626,14 @@ export default function CourseView({ course, goBack }) {
 
   // ── Schedule handlers ─────────────────────────────────────────────────────
   const handleAddSchedule = async () => {
-    setSchSaving(true);
+    setSchSaving(true); setSchError("");
     try {
       await apiAddSchedule(courseId, { ...newSch, switch: false });
       await loadSchedules();
       setShowSchForm(false);
       setNewSch({ scheduledDay: "Monday", startTime: "09:00", endTime: "09:50", method: "BLE" });
     } catch (e) {
-      setError(e.response?.data?.error || "Could not add schedule.");
+      setSchError(e.response?.data?.error || "Could not add schedule.");
     } finally {
       setSchSaving(false);
     }
@@ -629,12 +648,12 @@ export default function CourseView({ course, goBack }) {
   };
 
   const handleSaveSchedule = async (idx, data) => {
-    setSchSaving(true);
+    setSchSaving(true); setSchError("");
     try {
       await apiUpdateSchedule(courseId, idx, data);
       await loadSchedules();
     } catch (e) {
-      setError(e.response?.data?.error || "Could not update schedule.");
+      setSchError(e.response?.data?.error || "Could not update schedule.");
     } finally {
       setSchSaving(false);
     }
@@ -650,8 +669,8 @@ export default function CourseView({ course, goBack }) {
   const presentStudents = new Set(attendance.map(a => a.student)).size;
   const fmt = s => `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
 
-  // Disable starting a new session if today's lecture is cancelled
-  const todayLecs        = findTodaysLectures(courseData.lectures || []);
+  // Disable starting a new session if today's upcoming lecture is cancelled
+  const todayLecs        = findCancellableLectures(courseData.lectures || []);
   const isTodayCancelled = todayLecs.length > 0 && todayLecs.every(l => l.cancelled);
 
   return (
@@ -885,13 +904,19 @@ export default function CourseView({ course, goBack }) {
                   className="w-full bg-card border border-edge rounded-xl text-sm text-snow px-3 py-2 focus:outline-none focus:border-violet-500 transition-all" />
               </div>
             </div>
+            {schError && (
+              <div className="flex items-center gap-2 bg-rose-500/10 border border-rose-500/20 rounded-xl px-3 py-2">
+                <AlertCircle size={12} className="text-rose-400 shrink-0" />
+                <p className="text-rose-300 text-xs">{schError}</p>
+              </div>
+            )}
             <div className="flex gap-2">
               <button onClick={handleAddSchedule} disabled={schSaving}
                 className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-violet-500/15 text-violet-400 text-xs font-medium
                   border border-violet-500/20 hover:bg-violet-500/25 transition-colors disabled:opacity-50">
                 {schSaving ? <Spinner size={12} /> : <Save size={12} />} Save Schedule
               </button>
-              <button onClick={() => setShowSchForm(false)}
+              <button onClick={() => { setShowSchForm(false); setSchError(""); }}
                 className="px-4 py-2 rounded-xl bg-edge text-soft text-xs hover:text-snow transition-colors">
                 Cancel
               </button>
@@ -920,6 +945,8 @@ export default function CourseView({ course, goBack }) {
                 onDelete={handleDeleteSchedule}
                 onSave={handleSaveSchedule}
                 saving={schSaving}
+                error={schError}
+                clearError={() => setSchError("")}
               />
             ))}
           </div>
