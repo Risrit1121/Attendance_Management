@@ -1,13 +1,3 @@
-/**
- * jobs/index.js
- *
- * B4 FIX — backup cron:
- *   Old: '0 2 * * *'  → fires at 02:00 UTC = 07:30 IST (Docker runs UTC)
- *   New: '30 20 * * *' → fires at 20:30 UTC = 02:00 IST ✓
- *
- * All other cron expressions are minute-level ('* * * * *' or '*/15 * * * *')
- * so UTC vs IST makes no practical difference for them.
- */
 const cron                           = require('node-cron');
 const { rebuildAllBuckets }          = require('../services/bucketService');
 const { autoCreateFallbackSessions } = require('../services/autoSessionService');
