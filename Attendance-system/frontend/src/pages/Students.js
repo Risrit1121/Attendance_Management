@@ -226,9 +226,10 @@ function HistoryModal({ student, course, onClose }) {
                         <div className="flex-1 min-w-0">
                           <p className="text-snow text-xs font-medium">
                             {l.scheduledTime
-                              ? new Date(toZ(l.scheduledTime)).toLocaleDateString("en-IN", {
+                              ? new Date(toZ(l.scheduledTime)).toLocaleString("en-IN", {
                                   timeZone: "Asia/Kolkata",
                                   day: "2-digit", month: "short",
+                                  hour: "2-digit", minute: "2-digit", hour12: true,
                                 })
                               : "—"}
                           </p>

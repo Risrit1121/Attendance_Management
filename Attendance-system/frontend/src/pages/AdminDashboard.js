@@ -1,15 +1,15 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   getAdminStats, getAllCourses, createCourse, deleteCourse,
   getAllUsers, createProfessor, createStudent, deleteProfessor, deleteStudent,
   enrollStudent, unenrollStudent, getCourseEnrolled,
-  getAdminStudentAnalytics, addTA, removeTA,
+  getAdminStudentAnalytics, addTA, removeTA, getServerLogs,
 } from "../api/client";
 import API from "../api/client";
 import {
   Shield, Activity, Users, AlertTriangle, CheckCircle2, Server,
   Plus, Trash2, BookOpen, ChevronDown, ChevronUp, X,
-  Search, BarChart3, GraduationCap, UserPlus,
+  Search, BarChart3, GraduationCap, UserPlus, Terminal, RefreshCw,
 } from "lucide-react";
 import { Badge, Spinner, ProgressBar, AttendancePct } from "../components/UI";
 
@@ -563,6 +563,125 @@ function SessionsPanel() {
   );
 }
 
+// ── Live Logs Panel ───────────────────────────────────────────────────────────
+// Polls GET /admin/logs every 5 seconds and renders a terminal-style view.
+// Log levels are colour-coded: info = dim, warn = amber, error = rose.
+function LiveLogsPanel() {
+  const [logs,      setLogs]      = useState([]);
+  const [loading,   setLoading]   = useState(true);
+  const [error,     setError]     = useState("");
+  const [paused,    setPaused]    = useState(false);
+  const [autoScroll, setAutoScroll] = useState(true);
+  const bottomRef = useRef(null);
+
+  const fetchLogs = useCallback(async () => {
+    if (paused) return;
+    try {
+      const r = await getServerLogs(150);
+      setLogs(r.data);
+      setError("");
+    } catch (e) {
+      setError(e.response?.data?.error || "Could not fetch logs.");
+    } finally {
+      setLoading(false);
+    }
+  }, [paused]);
+
+  useEffect(() => {
+    fetchLogs();
+    const t = setInterval(fetchLogs, 5000);
+    return () => clearInterval(t);
+  }, [fetchLogs]);
+
+  // Auto-scroll to bottom when new logs arrive
+  useEffect(() => {
+    if (autoScroll && bottomRef.current) {
+      bottomRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [logs, autoScroll]);
+
+  const levelColor = (level) => {
+    if (level === "error") return "text-rose-400";
+    if (level === "warn")  return "text-amber-400";
+    return "text-soft";
+  };
+
+  const levelPrefix = (level) => {
+    if (level === "error") return "ERR";
+    if (level === "warn")  return "WRN";
+    return "INF";
+  };
+
+  return (
+    <div className="space-y-2">
+      {/* Toolbar */}
+      <div className="flex items-center gap-2">
+        <button
+          onClick={() => setPaused(p => !p)}
+          className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs border transition-colors ${
+            paused
+              ? "bg-amber-500/15 text-amber-400 border-amber-500/20"
+              : "bg-card text-soft border-edge hover:text-snow"
+          }`}
+        >
+          {paused ? "▶ Resume" : "⏸ Pause"}
+        </button>
+        <button
+          onClick={fetchLogs}
+          disabled={loading}
+          className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-card text-soft border border-edge text-xs hover:text-snow transition-colors disabled:opacity-50"
+        >
+          <RefreshCw size={11} className={loading ? "animate-spin" : ""} /> Refresh
+        </button>
+        <label className="flex items-center gap-1.5 text-xs text-soft cursor-pointer select-none ml-auto">
+          <input
+            type="checkbox"
+            checked={autoScroll}
+            onChange={e => setAutoScroll(e.target.checked)}
+            className="rounded"
+          />
+          Auto-scroll
+        </label>
+      </div>
+
+      {error && (
+        <p className="text-rose-400 text-xs px-1">{error}</p>
+      )}
+
+      {/* Log output */}
+      <div className="bg-[#0a0c10] border border-edge rounded-xl p-3 h-72 overflow-y-auto font-mono text-xs leading-relaxed">
+        {loading && logs.length === 0 ? (
+          <p className="text-dim">Loading logs…</p>
+        ) : logs.length === 0 ? (
+          <p className="text-dim">No log entries yet.</p>
+        ) : (
+          logs.map((entry, i) => (
+            <div key={i} className="flex gap-2 hover:bg-white/2 px-1 rounded">
+              <span className="text-dim shrink-0 select-none">
+                {new Date(entry.ts).toLocaleTimeString("en-IN", {
+                  timeZone: "Asia/Kolkata",
+                  hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+                })}
+              </span>
+              <span className={`shrink-0 select-none ${levelColor(entry.level)}`}>
+                {levelPrefix(entry.level)}
+              </span>
+              <span className={`flex-1 break-all whitespace-pre-wrap ${levelColor(entry.level)}`}>
+                {entry.text}
+              </span>
+            </div>
+          ))
+        )}
+        <div ref={bottomRef} />
+      </div>
+
+      <p className="text-dim text-xs font-mono px-1">
+        {logs.length} entries · refreshes every 5 s{paused ? " · paused" : ""}
+      </p>
+    </div>
+  );
+}
+
 // ── Expandable action card ────────────────────────────────────────────────────
 function ActionCard({ icon: Icon, title, subtitle, color, children }) {
   const [open, setOpen] = useState(false);
@@ -696,17 +815,9 @@ export default function AdminDashboard() {
           <SessionsPanel />
         </ActionCard>
 
-        <ActionCard icon={Server} title="Server Logs"
-          subtitle="Access backend logs via Docker CLI" color="amber">
-          <div className="bg-ink border border-edge rounded-xl p-4 font-mono text-xs space-y-2">
-            {[
-              "Server logs are generated by the Docker container.",
-              "To view live logs:", "  docker logs -f attendance-backend",
-              "Tail last 100 lines:", "  docker logs --tail 100 attendance-backend",
-            ].map((line, i) => (
-              <p key={i} className={line.startsWith("  ") ? "text-jade-400 pl-4" : "text-soft"}>{line}</p>
-            ))}
-          </div>
+        <ActionCard icon={Terminal} title="Server Logs"
+          subtitle="Live tail from the running process · last 150 lines" color="amber">
+          <LiveLogsPanel />
         </ActionCard>
       </div>
 

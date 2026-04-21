@@ -216,19 +216,55 @@ function QrPanel({ session, qr, source }) {
 //   - Its scheduledTime has not yet passed (or is within a 15-min past grace
 //     window — so a prof can still cancel right after a class was supposed to
 //     start but hasn't had attendance marked yet).
-const CANCEL_GRACE_MS = 15 * 60 * 1000;
- 
+const IST_OFFSET_MS  = 5.5 * 60 * 60 * 1000;
+const CANCEL_GRACE_MS = 15 * 60 * 1000; // 15 min past the start time
+
+function toIST(utcDate) {
+  return new Date(utcDate.getTime() + IST_OFFSET_MS);
+}
+
+/**
+ * Mirror of SchedulerContext.findActiveLecture — finds the pre-populated
+ * lecture whose scheduledTime (UTC) is within ±30 minutes of now in IST.
+ * Passed to startSession so the backend never falls through to ad-hoc
+ * lecture creation (Step 3 of resolveOrCreateLecture).
+ */
+function findActiveLectureForSession(lectures) {
+  if (!Array.isArray(lectures)) return null;
+  const now    = Date.now();
+  const nowIST = toIST(new Date(now));
+  // Convert nowIST back to minutes-since-midnight using its UTC fields
+  // (because toIST shifts the epoch so UTC fields == IST civil fields)
+  const nowMin   = nowIST.getUTCHours() * 60 + nowIST.getUTCMinutes();
+  const todayIdx = nowIST.getUTCDay(); // 0=Sun … 6=Sat in IST
+  const WINDOW   = 30; // minutes, matches backend LECTURE_MATCH_WINDOW_MS
+
+  const candidates = lectures
+    .filter(l => !l.cancelled)
+    .map(l => {
+      const istD   = toIST(new Date(l.scheduledTime));
+      const lecIdx = istD.getUTCDay();
+      const lecMin = istD.getUTCHours() * 60 + istD.getUTCMinutes();
+      return { ...l, lecIdx, lecMin, diff: Math.abs(lecMin - nowMin) };
+    })
+    .filter(l => l.lecIdx === todayIdx && l.diff <= WINDOW)
+    .sort((a, b) => a.diff - b.diff);
+
+  return candidates[0] || null;
+}
+
 function findCancellableLectures(lectures) {
   if (!Array.isArray(lectures)) return [];
-  const now = Date.now();
- 
-  // Use "en-CA" locale which always produces "YYYY-MM-DD" — safe for comparison.
-  const todayDate = new Date(now).toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
- 
+  const now        = Date.now();
+  const nowIST     = toIST(new Date(now));
+  const todayDate  = nowIST.toISOString().slice(0, 10); // YYYY-MM-DD in IST
+
   return lectures
     .filter(l => {
-      const lecDate = new Date(l.scheduledTime).toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+      const lecIST  = toIST(new Date(l.scheduledTime));
+      const lecDate = lecIST.toISOString().slice(0, 10);
       if (lecDate !== todayDate) return false;
+      // Only show if the lecture hasn't well and truly passed
       const lecMs = new Date(l.scheduledTime).getTime();
       return now <= lecMs + CANCEL_GRACE_MS;
     })
@@ -268,8 +304,7 @@ function CancelLectureBanner({ course, courseId, onCancelled }) {
   };
 
   const fmtTime = (utcStr) =>
-    new Date(utcStr).toLocaleTimeString("en-IN", {
-      timeZone: "Asia/Kolkata",
+    toIST(new Date(utcStr)).toLocaleTimeString("en-IN", {
       hour: "2-digit", minute: "2-digit", hour12: true,
     });
 
@@ -552,7 +587,17 @@ export default function CourseView({ course, goBack }) {
   const handleStart = async () => {
     setLoadingStart(true); setError("");
     try {
-      const res = await startSession({ course_id: courseId, mode });
+      // Resolve the pre-populated lecture within ±30 min of now and pass its
+      // lectureUID explicitly. This mirrors what SchedulerContext does, and
+      // ensures the backend's resolveOrCreateLecture hits Step 1 (direct
+      // lookup) rather than falling through to Step 3 (ad-hoc creation),
+      // which was producing duplicate lectures like the ones at 12:30:00Z.
+      const activeLec = findActiveLectureForSession(courseData.lectures || []);
+      const res = await startSession({
+        course_id:  courseId,
+        mode,
+        ...(activeLec ? { lectureUID: activeLec.lectureUID } : {}),
+      });
       setSession(res.data);
       setElapsed(0);
     } catch (e) {

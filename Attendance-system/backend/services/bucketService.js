@@ -1,17 +1,18 @@
 /**
  * bucketService.js
  *
- * The Bucket is a per-student cache of which lectures they fully attended
- * (present in ALL sessions of that lecture). It is used to:
+ * The Bucket is a per-student cache of which lectures they fully attended.
  *
- *  1. Fast read in GET /admin/student/:id/analytics (avoids scanning Attendance)
- *  2. Fast read in GET /student/:id/courses (quick attendance summary per course)
- *  3. The Students page heatmap (already uses /student/:id/history which is live,
- *     but the bucket lets us pre-compute overall pct per course cheaply)
+ * Event-loop yielding in rebuildAllBuckets:
+ *   The full rebuild runs every 15 minutes via cron. With 80+ students it
+ *   previously held the event loop during the synchronous parts of each
+ *   batch iteration (Promise.all resolves, but the orchestration loop itself
+ *   doesn't yield). This caused API requests to queue up and time out,
+ *   showing as "0 courses / 0 analytics" on the frontend.
  *
- * Write path: after every Attendance.mark, we call updateBucketForStudent(studentId)
- * which rebuilds just that student's bucket. The nightly cron rebuilds all buckets
- * as a safety net in case any incremental updates were missed.
+ *   Fix: await a setImmediate() between batches, giving the event loop a
+ *   chance to drain its I/O callback queue (pending HTTP requests, etc.)
+ *   before starting the next batch of DB work.
  */
 
 const Bucket     = require('../models/Bucket');
@@ -19,7 +20,14 @@ const Attendance = require('../models/Attendance');
 const Enrollment = require('../models/Enrollment');
 const Session    = require('../models/Session');
 
-// ── Core intersection (copy of analytics logic — single source of truth) ───────
+// ── Yield helper ──────────────────────────────────────────────────────────────
+// Returns a promise that resolves on the next event-loop iteration, allowing
+// pending I/O callbacks (incoming HTTP requests) to run between batches.
+function yieldToEventLoop() {
+  return new Promise(resolve => setImmediate(resolve));
+}
+
+// ── Core intersection ─────────────────────────────────────────────────────────
 function buildLectureAttendance(sessions, records) {
   const lectureMap  = new Map();
   for (const s of sessions) {
@@ -49,13 +57,6 @@ function buildLectureAttendance(sessions, records) {
   return lectureMap;
 }
 
-/**
- * Rebuild bucket for one student.
- * Bucket shape:
- *   { studentUID, courses: [{ courseUID, lectures: [{ lectureUID }] }], lastUpdated }
- *
- * Each entry in lectures[] = a lecture where the student was present in ALL sessions.
- */
 async function rebuildBucketForStudent(studentId) {
   const enrollments = await Enrollment.find({ student: studentId, status: 'Active' }).lean();
   const courseIds   = enrollments.map(e => e.course);
@@ -74,7 +75,7 @@ async function rebuildBucketForStudent(studentId) {
     sessionUID: { $in: sessions.map(s => s.sessionUID) },
   }).lean();
 
-  const lectureMap   = buildLectureAttendance(sessions, records);
+  const lectureMap    = buildLectureAttendance(sessions, records);
   const courseDataMap = {};
 
   for (const lec of lectureMap.values()) {
@@ -98,10 +99,6 @@ async function rebuildBucketForStudent(studentId) {
   );
 }
 
-/**
- * Fire-and-forget after each Attendance mark.
- * Rebuilds only the affected student.
- */
 async function updateBucketForStudent(studentId) {
   return rebuildBucketForStudent(studentId).catch(err =>
     console.error(`[Bucket] Update failed for ${studentId}:`, err.message)
@@ -110,12 +107,19 @@ async function updateBucketForStudent(studentId) {
 
 /**
  * Full rebuild — called by nightly cron and admin /rebuild-buckets.
+ *
+ * Yields to the event loop between every batch of 50 so that incoming
+ * HTTP requests are not starved during the rebuild cycle.
  */
 async function rebuildAllBuckets() {
   const studentIds = await Enrollment.distinct('student');
   console.log(`[BucketJob] Rebuilding ${studentIds.length} buckets...`);
   const BATCH = 50;
   for (let i = 0; i < studentIds.length; i += BATCH) {
+    // Yield between batches — lets pending HTTP requests be handled before
+    // the next batch of heavy DB queries starts.
+    if (i > 0) await yieldToEventLoop();
+
     await Promise.all(
       studentIds.slice(i, i + BATCH).map(sid =>
         rebuildBucketForStudent(sid).catch(e =>
@@ -127,10 +131,6 @@ async function rebuildAllBuckets() {
   console.log('[BucketJob] Done.');
 }
 
-/**
- * Read bucket for a student — used by the students page for quick per-course summary.
- * Returns null if no bucket exists yet.
- */
 async function getBucketForStudent(studentId) {
   return Bucket.findOne({ studentUID: studentId }).lean();
 }
