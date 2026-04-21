@@ -738,10 +738,23 @@ export default function AdminDashboard() {
   if (loading) return <div className="flex items-center justify-center h-64"><Spinner size={28} /></div>;
 
   const services = [
-    { name: "Node API",  status: !error, detail: "http://localhost:4040" },
-    { name: "MongoDB",   status: !error, detail: "mongoose / attendance" },
-    { name: "BLE Svc",  status: true,   detail: process.env.REACT_APP_BLE_URL || "http://localhost:8000" },
-    { name: "JWT Auth",  status: true,   detail: "HS256" },
+    {
+      name: "Node API",
+      status: !error,
+      detail: process.env.REACT_APP_API_URL || "https://your-backend.onrender.com"
+    },
+    {
+      name: "MongoDB",
+      status: !error,
+      detail: "MongoDB Atlas (cloud database)"
+    },
+    {
+      name: "BLE & QR",
+      status: true,
+      detail:
+        process.env.REACT_APP_BLE_QR_URL ||
+        "https://your-ble-qr-service.onrender.com"
+    }
   ];
 
   return (
