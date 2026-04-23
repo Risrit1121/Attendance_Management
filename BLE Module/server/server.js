@@ -90,12 +90,18 @@ app.use((req, res, next) => {
 
   next();
 });
+// Static files
+app.use(express.static("public"));
+
 // Routes
 const bleRoutes = require("./src/modules/ble/ble.routes");
 app.use("/ble", bleRoutes);
 
 const qrRoutes = require("./src/modules/qr/qr.routes");
 app.use("/qr", qrRoutes);
+
+const adminRoutes = require("./src/modules/admin/admin.routes");
+app.use("/admin", adminRoutes);
 
 
 // Health check
