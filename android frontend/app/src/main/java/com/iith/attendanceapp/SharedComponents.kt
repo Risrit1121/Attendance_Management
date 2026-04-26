@@ -73,7 +73,7 @@ fun BannerCard(
 
 // ── Profile Sheet ─────────────────────────────────────────────────────────────
 @Composable
-fun ProfileSheet(onLogout: () -> Unit, onClose: () -> Unit) {
+fun ProfileSheet(userId: String = "", userName: String = "", onLogout: () -> Unit, onClose: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -87,9 +87,8 @@ fun ProfileSheet(onLogout: () -> Unit, onClose: () -> Unit) {
             modifier = Modifier.size(80.dp)
         )
         Spacer(Modifier.height(16.dp))
-        Text("Sreehith Sanam", fontSize = 20.sp, fontWeight = FontWeight.Bold)
-        Text("sreehith@iith.ac.in", fontSize = 14.sp, color = Color.Gray)
-        Text("CS22BTECH11050", fontSize = 14.sp, color = Color.Gray)
+        Text(userName.ifBlank { "User" }, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+        Text(userId.ifBlank { "" }, fontSize = 14.sp, color = Color.Gray)
 
         Spacer(Modifier.height(24.dp))
         Divider()

@@ -15,10 +15,10 @@ import androidx.navigation.compose.rememberNavController
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AdminTabView(onLogout: () -> Unit) {
+fun AdminTabView(userId: String, userName: String, token: String, onLogout: () -> Unit) {
     val navController = rememberNavController()
     var showProfile by remember { mutableStateOf(false) }
-    var currentTab by remember { mutableStateOf("courses") }
+    var currentTab  by remember { mutableStateOf("courses") }
 
     Scaffold(
         topBar = {
@@ -35,28 +35,30 @@ fun AdminTabView(onLogout: () -> Unit) {
             NavigationBar {
                 NavigationBarItem(
                     selected = currentTab == "courses",
-                    onClick = { currentTab = "courses"; navController.navigate("courses") { launchSingleTop = true } },
-                    icon = { Icon(Icons.Default.Book, null) },
-                    label = { Text("Courses") }
+                    onClick  = { currentTab = "courses"; navController.navigate("courses") { launchSingleTop = true } },
+                    icon     = { Icon(Icons.Default.Book, null) },
+                    label    = { Text("Courses") }
                 )
                 NavigationBarItem(
                     selected = currentTab == "analytics",
-                    onClick = { currentTab = "analytics"; navController.navigate("analytics") { launchSingleTop = true } },
-                    icon = { Icon(Icons.Default.BarChart, null) },
-                    label = { Text("Analytics") }
+                    onClick  = { currentTab = "analytics"; navController.navigate("analytics") { launchSingleTop = true } },
+                    icon     = { Icon(Icons.Default.BarChart, null) },
+                    label    = { Text("Analytics") }
                 )
             }
         }
     ) { padding ->
         NavHost(navController, startDestination = "courses", modifier = Modifier.padding(padding)) {
-            composable("courses")   { AdminCoursesScreen() }
-            composable("analytics") { AdminAnalyticsScreen() }
+            composable("courses")   { AdminCoursesScreen(token = token) }
+            composable("analytics") { AdminAnalyticsScreen(token = token) }
         }
     }
 
     if (showProfile) {
         ModalBottomSheet(onDismissRequest = { showProfile = false }) {
             ProfileSheet(
+                userId   = userId,
+                userName = userName,
                 onLogout = { showProfile = false; onLogout() },
                 onClose  = { showProfile = false }
             )

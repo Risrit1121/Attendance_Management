@@ -3,6 +3,7 @@ package com.iith.attendanceapp
 import android.graphics.Bitmap
 import android.util.Base64
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
@@ -30,43 +31,27 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.Executors
 
-// ── Converts ImageProxy → base64 JPEG string ─────────────────────────────────
 private fun imageProxyToBase64(image: ImageProxy): String {
     val bitmap = image.toBitmap()
     val stream = ByteArrayOutputStream()
-    bitmap.compress(Bitmap.CompressFormat.JPEG, 85, stream)
-    val bytes = stream.toByteArray()
+    bitmap.compress(Bitmap.CompressFormat.JPEG, 60, stream)
     image.close()
-    return Base64.encodeToString(bytes, Base64.NO_WRAP)
+    return Base64.encodeToString(stream.toByteArray(), Base64.NO_WRAP)
 }
 
-// ── Camera preview + capture composable ──────────────────────────────────────
+// ── Camera with ImageCapture ──────────────────────────────────────────────────
 @Composable
-fun CameraWithCapture(
-    useFrontCamera: Boolean,
-    modifier: Modifier = Modifier,
-    onCaptureBound: (ImageCapture) -> Unit
-) {
-    val context       = LocalContext.current
+fun CameraWithCapture(useFrontCamera: Boolean, modifier: Modifier = Modifier, onCaptureBound: (ImageCapture) -> Unit) {
+    val context        = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
-
     AndroidView(
         factory = { ctx ->
-            val previewView   = PreviewView(ctx)
-            val imageCapture  = ImageCapture.Builder()
-                .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-                .build()
-            val preview = Preview.Builder().build().also {
-                it.setSurfaceProvider(previewView.surfaceProvider)
-            }
-            val selector = if (useFrontCamera)
-                CameraSelector.DEFAULT_FRONT_CAMERA
-            else
-                CameraSelector.DEFAULT_BACK_CAMERA
-
-            val future = ProcessCameraProvider.getInstance(ctx)
-            future.addListener({
-                val provider = future.get()
+            val previewView  = PreviewView(ctx)
+            val imageCapture = ImageCapture.Builder().setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY).build()
+            val preview      = Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
+            val selector     = if (useFrontCamera) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
+            ProcessCameraProvider.getInstance(ctx).addListener({
+                val provider = ProcessCameraProvider.getInstance(ctx).get()
                 provider.unbindAll()
                 provider.bindToLifecycle(lifecycleOwner, selector, preview, imageCapture)
                 onCaptureBound(imageCapture)
@@ -77,285 +62,220 @@ fun CameraWithCapture(
     )
 }
 
-// ── ENROLL SCREEN ─────────────────────────────────────────────────────────────
-// Takes one straight-face photo and sends to /enroll
+// ── Camera with ImageAnalysis (liveness) ─────────────────────────────────────
 @Composable
-fun FaceEnrollScreen(userId: String, onDone: () -> Unit, onBack: () -> Unit) {
-    var imageCapture  by remember { mutableStateOf<ImageCapture?>(null) }
-    var status        by remember { mutableStateOf<String?>(null) }   // null = idle
-    var loading       by remember { mutableStateOf(false) }
-    val executor      = remember { Executors.newSingleThreadExecutor() }
-    val context       = LocalContext.current
-
-    WithCameraPermission {
-        Column(
-            modifier = Modifier.fillMaxSize().background(BGGray).padding(horizontal = 24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Spacer(Modifier.height(16.dp))
-            TextButton(onClick = onBack, modifier = Modifier.align(Alignment.Start)) {
-                Text("← Back", color = GBlue)
-            }
-            Text("Face Enrollment", fontSize = 20.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(6.dp))
-            Text(
-                "Look straight at the camera and tap Capture.",
-                fontSize = 13.sp, color = Color.Gray, textAlign = TextAlign.Center
-            )
-            Spacer(Modifier.height(16.dp))
-
-            CameraWithCapture(
-                useFrontCamera = true,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .aspectRatio(1f)
-                    .clip(RoundedCornerShape(16.dp)),
-                onCaptureBound = { imageCapture = it }
-            )
-
-            Spacer(Modifier.height(24.dp))
-
-            when {
-                status == "enrolled" -> {
-                    StatusCard("✓ Enrolled successfully!", GGreen)
-                    Spacer(Modifier.height(16.dp))
-                    Button(
-                        onClick = onDone,
-                        modifier = Modifier.fillMaxWidth().height(52.dp),
-                        shape = RoundedCornerShape(10.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = GBlue)
-                    ) { Text("Continue to App", fontWeight = FontWeight.Bold) }
-                }
-                status == "no_face" -> {
-                    StatusCard("No face detected. Please try again.", Color.Red)
-                    Spacer(Modifier.height(16.dp))
-                    CaptureButton(loading) {
-                        captureAndEnroll(imageCapture, executor, userId) { s ->
-                            loading = false; status = s
-                        }
-                        loading = true; status = null
-                    }
-                }
-                status?.startsWith("error") == true -> {
-                    StatusCard("Error: $status\n\nCheck BACKEND_BASE_URL in FaceApiClient.kt", Color.Red)
-                    Spacer(Modifier.height(16.dp))
-                    CaptureButton(loading) {
-                        captureAndEnroll(imageCapture, executor, userId) { s ->
-                            loading = false; status = s
-                        }
-                        loading = true; status = null
-                    }
-                }
-                else -> CaptureButton(loading) {
-                    captureAndEnroll(imageCapture, executor, userId) { s ->
-                        loading = false; status = s
-                    }
-                    loading = true; status = null
-                }
-            }
-        }
-    }
-}
-
-private fun captureAndEnroll(
-    imageCapture: ImageCapture?,
-    executor: java.util.concurrent.Executor,
-    userId: String,
-    onStatus: (String) -> Unit
-) {
-    imageCapture ?: run { onStatus("error: camera not ready"); return }
-    imageCapture.takePicture(executor, object : ImageCapture.OnImageCapturedCallback() {
-        override fun onCaptureSuccess(image: ImageProxy) {
-            val b64 = imageProxyToBase64(image)
-            enrollFace(userId, listOf(b64)) { resp -> onStatus(resp.status) }
-        }
-        override fun onError(exc: ImageCaptureException) { onStatus("error: ${exc.message}") }
-    })
+fun CameraWithAnalysis(useFrontCamera: Boolean, modifier: Modifier = Modifier, onAnalyzer: (ImageProxy) -> Unit) {
+    val context        = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val executor       = remember { Executors.newSingleThreadExecutor() }
+    AndroidView(
+        factory = { ctx ->
+            val previewView = PreviewView(ctx)
+            val preview     = Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
+            val analysis    = ImageAnalysis.Builder().setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST).build()
+                .also { it.setAnalyzer(executor) { imageProxy -> onAnalyzer(imageProxy) } }
+            val selector = if (useFrontCamera) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
+            ProcessCameraProvider.getInstance(ctx).addListener({
+                val provider = ProcessCameraProvider.getInstance(ctx).get()
+                provider.unbindAll()
+                provider.bindToLifecycle(lifecycleOwner, selector, preview, analysis)
+            }, ContextCompat.getMainExecutor(ctx))
+            previewView
+        },
+        modifier = modifier
+    )
 }
 
 // ── FACE VERIFY SCREEN ────────────────────────────────────────────────────────
-// Step 1: capture straight face
-// Step 2: capture turned face (randomly left or right)
-// Then send both to /verify and show result
+// Uses LivenessDetector + FaceAnalyzer from liveness folder.
+// On liveness success → sends frames to /api/student/faceVerify → markAttendance
+// If not enrolled → prompts user to upload photo via profile icon
 @Composable
-fun FaceCameraScreen(userId: String, onSuccess: () -> Unit) {
-    var imageCapture  by remember { mutableStateOf<ImageCapture?>(null) }
-    var captureStep   by remember { mutableStateOf(1) }   // 1 = straight, 2 = turned
-    var straightB64   by remember { mutableStateOf<String?>(null) }
-    var loading       by remember { mutableStateOf(false) }
-    var verifyResult  by remember { mutableStateOf<VerifyResponse?>(null) }
-    val executor      = remember { Executors.newSingleThreadExecutor() }
-    // Randomly pick left or right once per verification session
-    val turnDirection = remember { if ((0..1).random() == 0) "LEFT" else "RIGHT" }
+fun FaceCameraScreen(userId: String, sessionId: String, token: String, mode: String = "BLE", onSuccess: () -> Unit) {
+    var promptText   by remember { mutableStateOf("Position your face in the oval") }
+    var stepText     by remember { mutableStateOf("") }
+    var progressFrac by remember { mutableStateOf(0f) }
+    var loading      by remember { mutableStateOf(false) }
+    var verifyStatus by remember { mutableStateOf<String?>(null) }
+    var markingDone  by remember { mutableStateOf(false) }
+    var livenessFail by remember { mutableStateOf<String?>(null) }
+    var livenessFrames by remember { mutableStateOf<List<String>>(emptyList()) }
+    var livenessChallenges by remember { mutableStateOf<List<String>>(emptyList()) }
 
-    WithCameraPermission {
-        Column(
-            modifier = Modifier.fillMaxSize().background(BGGray).padding(horizontal = 24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Spacer(Modifier.height(16.dp))
+    val livenessEvent = remember { mutableStateOf<LivenessEvent>(LivenessEvent.Idle) }
 
-            Text("Face Verification", fontSize = 20.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(6.dp))
-
-            // Instruction changes per step
-            val instruction = when {
-                verifyResult != null -> ""
-                captureStep == 1     -> "Look straight at the camera and tap Capture."
-                else                 -> "Now slowly turn your face to the $turnDirection and tap Capture."
-            }
-            if (instruction.isNotEmpty()) {
-                Text(instruction, fontSize = 13.sp, color = Color.Gray, textAlign = TextAlign.Center)
-            }
-
-            // Step indicator
-            Spacer(Modifier.height(12.dp))
-            if (verifyResult == null) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    StepDot(num = 1, label = "Straight", active = captureStep >= 1)
-                    Divider(modifier = Modifier.weight(1f),
-                        color = if (captureStep >= 2) GBlue else Color.LightGray, thickness = 2.dp)
-                    StepDot(num = 2, label = "Turn $turnDirection", active = captureStep >= 2)
+    val detector = remember {
+        LivenessDetector(
+            onChallengeChanged = { challenge, index, total ->
+                livenessEvent.value = LivenessEvent.PromptChanged(challenge.instruction, index, total)
+            },
+            onComplete = { result ->
+                if (result.isLive) {
+                    livenessEvent.value = LivenessEvent.Success(emptyList(), result.completedChallenges.map { it.instruction })
+                } else {
+                    livenessEvent.value = LivenessEvent.Failed(result.failureReason ?: "Liveness check failed.")
                 }
-                Spacer(Modifier.height(12.dp))
+            },
+            challengeCount    = 2,
+            challengeTimeoutMs = 6000L
+        )
+    }
+
+    val analyzer = remember { FaceAnalyzer { face -> detector.processFace(face) } }
+
+    LaunchedEffect(Unit) { detector.start() }
+
+    LaunchedEffect(livenessEvent.value) {
+        when (val event = livenessEvent.value) {
+            is LivenessEvent.PromptChanged -> {
+                promptText   = event.text
+                stepText     = "Step ${event.index} of ${event.total}"
+                progressFrac = (event.index - 1f) / event.total
             }
-
-            // Camera preview — hide after result received
-            if (verifyResult == null) {
-                CameraWithCapture(
-                    useFrontCamera = true,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .aspectRatio(1f)
-                        .clip(RoundedCornerShape(16.dp)),
-                    onCaptureBound = { imageCapture = it }
-                )
-                Spacer(Modifier.height(24.dp))
-            }
-
-            // Result card
-            verifyResult?.let { result ->
-                val accepted = result.status == "verified"
-                val cardColor = if (accepted) GGreen else Color.Red
-                val icon      = if (accepted) "✓" else "✗"
-                val label     = if (accepted) "Attendance Marked!" else when (result.status) {
-                    "no_face"       -> "No face detected"
-                    "user_not_found"-> "User not enrolled. Please enroll first."
-                    "error"         -> "Error: ${result.error}"
-                    else            -> "Verification Failed"
-                }
-
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(cardColor.copy(alpha = 0.1f))
-                        .border(2.dp, cardColor, RoundedCornerShape(16.dp))
-                        .padding(24.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    Text(icon, fontSize = 48.sp, color = cardColor)
-                    Spacer(Modifier.height(8.dp))
-                    Text(label, fontSize = 16.sp, fontWeight = FontWeight.Bold,
-                        color = cardColor, textAlign = TextAlign.Center)
-                    if (result.similarity > 0.0) {
-                        Spacer(Modifier.height(8.dp))
-                        Text(
-                            "Similarity: ${"%.1f".format(result.similarity * 100)}%",
-                            fontSize = 14.sp, color = Color.Gray
-                        )
+            is LivenessEvent.Failed -> { livenessFail = event.reason }
+            is LivenessEvent.Success -> {
+                promptText = "Liveness verified! Verifying identity..."
+                loading    = true
+                apiFaceVerify(userId, livenessFrames.ifEmpty { listOf("") }, emptyList(), token) { result ->
+                    loading      = false
+                    verifyStatus = result.status
+                    if (result.status == "verified") {
+                        loading = true
+                        apiMarkAttendance(userId, sessionId, mode, token) { markResult ->
+                            loading     = false
+                            markingDone = markResult.success
+                        }
                     }
                 }
+            }
+            is LivenessEvent.Idle -> {}
+        }
+    }
 
+    WithCameraPermission {
+        Column(modifier = Modifier.fillMaxSize().background(BGGray).padding(horizontal = 24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally) {
+            Spacer(Modifier.height(16.dp))
+            Text("Face Verification", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(8.dp))
+
+            // Result card
+            if (verifyStatus != null) {
+                val accepted  = verifyStatus == "verified"
+                val cardColor = if (accepted) GGreen else Color.Red
+                val label = when {
+                    accepted                          -> if (markingDone) "Attendance Marked!" else "Verified! Marking attendance..."
+                    verifyStatus == "no_face"         -> "No face detected."
+                    verifyStatus == "user_not_found"  -> "Not enrolled.\nTap the profile icon (top right) to upload your photo."
+                    verifyStatus == "failed"          -> "Verification Failed. Try again."
+                    else                              -> "Error: $verifyStatus"
+                }
+                ResultCard(if (accepted) "✓" else "✗", label, cardColor, loading)
                 Spacer(Modifier.height(24.dp))
-
-                if (accepted) {
-                    Button(
-                        onClick = onSuccess,
-                        modifier = Modifier.fillMaxWidth().height(52.dp),
-                        shape = RoundedCornerShape(10.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = GGreen)
-                    ) { Text("Done", fontWeight = FontWeight.Bold) }
-                } else {
-                    // Allow retry
-                    Button(
-                        onClick = {
-                            verifyResult = null
-                            captureStep  = 1
-                            straightB64  = null
-                        },
-                        modifier = Modifier.fillMaxWidth().height(52.dp),
-                        shape = RoundedCornerShape(10.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = GBlue)
-                    ) { Text("Try Again", fontWeight = FontWeight.Bold) }
+                if (accepted && markingDone) {
+                    Button(onClick = onSuccess, modifier = Modifier.fillMaxWidth().height(52.dp),
+                        shape = RoundedCornerShape(10.dp), colors = ButtonDefaults.buttonColors(containerColor = GGreen)) {
+                        Text("Done", fontWeight = FontWeight.Bold)
+                    }
+                } else if (!accepted) {
+                    Button(onClick = {
+                        verifyStatus = null; livenessFail = null; markingDone = false
+                        livenessFrames = emptyList(); detector.start(); livenessEvent.value = LivenessEvent.Idle
+                    }, modifier = Modifier.fillMaxWidth().height(52.dp), shape = RoundedCornerShape(10.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = GBlue)) {
+                        Text("Try Again", fontWeight = FontWeight.Bold)
+                    }
                 }
                 return@WithCameraPermission
             }
 
-            // Capture button
-            CaptureButton(loading) {
-                loading = true
-                imageCapture?.takePicture(executor, object : ImageCapture.OnImageCapturedCallback() {
-                    override fun onCaptureSuccess(image: ImageProxy) {
-                        val b64 = imageProxyToBase64(image)
-                        if (captureStep == 1) {
-                            straightB64 = b64
-                            loading     = false
-                            captureStep = 2
-                        } else {
-                            // Both photos captured — send to /verify
-                            val frames = listOf(straightB64!!, b64)
-                            verifyFace(userId, frames) { resp ->
-                                loading      = false
-                                verifyResult = resp
-                            }
-                        }
-                    }
-                    override fun onError(exc: ImageCaptureException) {
-                        loading      = false
-                        verifyResult = VerifyResponse(status = "error", error = exc.message ?: "Capture failed")
-                    }
-                })
+            // Liveness failed
+            if (livenessFail != null) {
+                StatusCard(livenessFail!!, Color.Red)
+                Spacer(Modifier.height(16.dp))
+                Button(onClick = { livenessFail = null; livenessFrames = emptyList(); detector.start(); livenessEvent.value = LivenessEvent.Idle },
+                    modifier = Modifier.fillMaxWidth().height(52.dp), shape = RoundedCornerShape(10.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = GBlue)) {
+                    Text("Retry", fontWeight = FontWeight.Bold)
+                }
+                return@WithCameraPermission
+            }
+
+            // Progress
+            if (stepText.isNotBlank()) {
+                Text(stepText, fontSize = 12.sp, color = Color.Gray)
+                Spacer(Modifier.height(4.dp))
+                LinearProgressIndicator(progress = { progressFrac },
+                    modifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)),
+                    color = GBlue, trackColor = Color.LightGray)
+                Spacer(Modifier.height(8.dp))
+            }
+
+            // Prompt
+            Box(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
+                .background(GBlue.copy(alpha = 0.10f)).padding(12.dp), contentAlignment = Alignment.Center) {
+                Text(promptText, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = GBlue, textAlign = TextAlign.Center)
+            }
+            Spacer(Modifier.height(12.dp))
+
+            // Camera + oval overlay
+            Box(modifier = Modifier.fillMaxWidth().aspectRatio(0.85f)) {
+                CameraWithAnalysis(useFrontCamera = true,
+                    modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(16.dp))) { imageProxy ->
+                    analyzer.analyze(imageProxy)
+                }
+                FaceOvalOverlay(modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(16.dp)))
+            }
+
+            if (loading) {
+                Spacer(Modifier.height(16.dp))
+                CircularProgressIndicator(color = GBlue)
+                Spacer(Modifier.height(8.dp))
+                Text("Processing...", fontSize = 13.sp, color = Color.Gray)
             }
         }
     }
 }
 
+// ── Liveness event ────────────────────────────────────────────────────────────
+sealed class LivenessEvent {
+    object Idle : LivenessEvent()
+    data class PromptChanged(val text: String, val index: Int, val total: Int) : LivenessEvent()
+    data class Success(val frames: List<String>, val challenges: List<String>) : LivenessEvent()
+    data class Failed(val reason: String) : LivenessEvent()
+}
+
 // ── Shared UI helpers ─────────────────────────────────────────────────────────
 @Composable
-private fun CaptureButton(loading: Boolean, onClick: () -> Unit) {
-    Button(
-        onClick = onClick,
-        enabled = !loading,
-        modifier = Modifier.fillMaxWidth().height(52.dp),
-        shape = RoundedCornerShape(10.dp),
-        colors = ButtonDefaults.buttonColors(containerColor = GBlue)
-    ) {
+fun CaptureButton(loading: Boolean, onClick: () -> Unit) {
+    Button(onClick = onClick, enabled = !loading, modifier = Modifier.fillMaxWidth().height(52.dp),
+        shape = RoundedCornerShape(10.dp), colors = ButtonDefaults.buttonColors(containerColor = GBlue)) {
         if (loading) {
             CircularProgressIndicator(color = Color.White, modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
-            Spacer(Modifier.width(10.dp))
-            Text("Processing...", fontWeight = FontWeight.Bold)
-        } else {
-            Text("Capture", fontWeight = FontWeight.Bold, fontSize = 16.sp)
-        }
+            Spacer(Modifier.width(10.dp)); Text("Processing...", fontWeight = FontWeight.Bold)
+        } else Text("Capture", fontWeight = FontWeight.Bold, fontSize = 16.sp)
     }
 }
 
 @Composable
-private fun StatusCard(message: String, color: Color) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .background(color.copy(alpha = 0.1f))
-            .border(1.dp, color, RoundedCornerShape(12.dp))
-            .padding(16.dp)
-    ) {
-        Text(message, color = color, fontSize = 14.sp,
-            fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center,
-            modifier = Modifier.fillMaxWidth())
+fun StatusCard(message: String, color: Color) {
+    Box(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+        .background(color.copy(alpha = 0.1f)).border(1.dp, color, RoundedCornerShape(12.dp)).padding(16.dp)) {
+        Text(message, color = color, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+            textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
+    }
+}
+
+@Composable
+fun ResultCard(icon: String, label: String, color: Color, loading: Boolean) {
+    Column(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp))
+        .background(color.copy(alpha = 0.1f)).border(2.dp, color, RoundedCornerShape(16.dp)).padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally) {
+        if (loading) CircularProgressIndicator(color = color)
+        else {
+            Text(icon, fontSize = 48.sp, color = color)
+            Spacer(Modifier.height(8.dp))
+            Text(label, fontSize = 16.sp, fontWeight = FontWeight.Bold, color = color, textAlign = TextAlign.Center)
+        }
     }
 }
