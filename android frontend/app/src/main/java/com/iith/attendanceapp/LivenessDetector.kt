@@ -111,12 +111,14 @@ class LivenessDetector(
 
     private fun checkTurnLeft(m: FaceMetrics): Boolean {
         if (!neutralCaptured) return false
-        return (neutralHeadY - m.headEulerAngleY) > TURN_ANGLE_THRESHOLD
+        // User turns left → face moves right in camera → headEulerAngleY increases
+        return (m.headEulerAngleY - neutralHeadY) > TURN_ANGLE_THRESHOLD
     }
 
     private fun checkTurnRight(m: FaceMetrics): Boolean {
         if (!neutralCaptured) return false
-        return (m.headEulerAngleY - neutralHeadY) > TURN_ANGLE_THRESHOLD
+        // User turns right → face moves left in camera → headEulerAngleY decreases
+        return (neutralHeadY - m.headEulerAngleY) > TURN_ANGLE_THRESHOLD
     }
 
     private fun checkNod(m: FaceMetrics): Boolean {

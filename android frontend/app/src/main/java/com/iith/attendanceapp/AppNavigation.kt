@@ -6,6 +6,7 @@ enum class UserRole { STUDENT, PROFESSOR, ADMIN }
 
 private sealed class AppScreen {
     object RoleSelect : AppScreen()
+    object LivenessTest : AppScreen()
     data class Login(val role: UserRole) : AppScreen()
     data class StudentHome(val userId: String, val userName: String, val email: String, val token: String) : AppScreen()
     data class ProfessorHome(val userId: String, val userName: String, val token: String) : AppScreen()
@@ -17,7 +18,12 @@ fun AttendanceApp() {
     var screen by remember { mutableStateOf<AppScreen>(AppScreen.RoleSelect) }
 
     when (val s = screen) {
-        is AppScreen.RoleSelect -> RoleSelectionScreen { role -> screen = AppScreen.Login(role) }
+        is AppScreen.RoleSelect -> RoleSelectionScreen(
+            onContinue = { role -> screen = AppScreen.Login(role) },
+            onTestLiveness = { screen = AppScreen.LivenessTest }
+        )
+
+        is AppScreen.LivenessTest -> LivenessTestScreen(onBack = { screen = AppScreen.RoleSelect })
 
         is AppScreen.Login -> LoginScreen(
             role    = s.role,

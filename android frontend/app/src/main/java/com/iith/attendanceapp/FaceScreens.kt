@@ -39,6 +39,16 @@ private fun imageProxyToBase64(image: ImageProxy): String {
     return Base64.encodeToString(stream.toByteArray(), Base64.NO_WRAP)
 }
 
+// Reads frame as base64 WITHOUT closing the proxy (caller is responsible for closing)
+private fun imageProxyToBase64Safe(image: ImageProxy): String? {
+    return try {
+        val bitmap = image.toBitmap()
+        val stream = ByteArrayOutputStream()
+        bitmap.compress(Bitmap.CompressFormat.JPEG, 60, stream)
+        Base64.encodeToString(stream.toByteArray(), Base64.NO_WRAP)
+    } catch (e: Exception) { null }
+}
+
 // ── Camera with ImageCapture ──────────────────────────────────────────────────
 @Composable
 fun CameraWithCapture(useFrontCamera: Boolean, modifier: Modifier = Modifier, onCaptureBound: (ImageCapture) -> Unit) {
@@ -64,7 +74,12 @@ fun CameraWithCapture(useFrontCamera: Boolean, modifier: Modifier = Modifier, on
 
 // ── Camera with ImageAnalysis (liveness) ─────────────────────────────────────
 @Composable
-fun CameraWithAnalysis(useFrontCamera: Boolean, modifier: Modifier = Modifier, onAnalyzer: (ImageProxy) -> Unit) {
+fun CameraWithAnalysis(
+    useFrontCamera: Boolean,
+    modifier: Modifier = Modifier,
+    onFrameCaptured: ((String) -> Unit)? = null,
+    onAnalyzer: (ImageProxy) -> Unit
+) {
     val context        = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val executor       = remember { Executors.newSingleThreadExecutor() }
@@ -73,7 +88,13 @@ fun CameraWithAnalysis(useFrontCamera: Boolean, modifier: Modifier = Modifier, o
             val previewView = PreviewView(ctx)
             val preview     = Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
             val analysis    = ImageAnalysis.Builder().setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST).build()
-                .also { it.setAnalyzer(executor) { imageProxy -> onAnalyzer(imageProxy) } }
+                .also { it.setAnalyzer(executor) { imageProxy ->
+                    if (onFrameCaptured != null) {
+                        val b64 = imageProxyToBase64Safe(imageProxy)
+                        if (b64 != null) onFrameCaptured(b64)
+                    }
+                    onAnalyzer(imageProxy)
+                } }
             val selector = if (useFrontCamera) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
             ProcessCameraProvider.getInstance(ctx).addListener({
                 val provider = ProcessCameraProvider.getInstance(ctx).get()
@@ -99,10 +120,11 @@ fun FaceCameraScreen(userId: String, sessionId: String, token: String, mode: Str
     var verifyStatus by remember { mutableStateOf<String?>(null) }
     var markingDone  by remember { mutableStateOf(false) }
     var livenessFail by remember { mutableStateOf<String?>(null) }
-    var livenessFrames by remember { mutableStateOf<List<String>>(emptyList()) }
-    var livenessChallenges by remember { mutableStateOf<List<String>>(emptyList()) }
 
     val livenessEvent = remember { mutableStateOf<LivenessEvent>(LivenessEvent.Idle) }
+
+    // Captured frames buffer — filled during liveness, sent to backend on success
+    val capturedFrames = remember { mutableListOf<String>() }
 
     val detector = remember {
         LivenessDetector(
@@ -111,7 +133,10 @@ fun FaceCameraScreen(userId: String, sessionId: String, token: String, mode: Str
             },
             onComplete = { result ->
                 if (result.isLive) {
-                    livenessEvent.value = LivenessEvent.Success(emptyList(), result.completedChallenges.map { it.instruction })
+                    livenessEvent.value = LivenessEvent.Success(
+                        capturedFrames.toList(),
+                        result.completedChallenges.map { it.instruction }
+                    )
                 } else {
                     livenessEvent.value = LivenessEvent.Failed(result.failureReason ?: "Liveness check failed.")
                 }
@@ -121,7 +146,11 @@ fun FaceCameraScreen(userId: String, sessionId: String, token: String, mode: Str
         )
     }
 
-    val analyzer = remember { FaceAnalyzer { face -> detector.processFace(face) } }
+    val analyzer = remember {
+        FaceAnalyzer { face ->
+            detector.processFace(face)
+        }
+    }
 
     LaunchedEffect(Unit) { detector.start() }
 
@@ -136,7 +165,8 @@ fun FaceCameraScreen(userId: String, sessionId: String, token: String, mode: Str
             is LivenessEvent.Success -> {
                 promptText = "Liveness verified! Verifying identity..."
                 loading    = true
-                apiFaceVerify(userId, livenessFrames.ifEmpty { listOf("") }, emptyList(), token) { result ->
+                val frames = event.frames.ifEmpty { listOf("") }
+                apiFaceVerify(userId, frames, emptyList(), token) { result ->
                     loading      = false
                     verifyStatus = result.status
                     if (result.status == "verified") {
@@ -180,7 +210,7 @@ fun FaceCameraScreen(userId: String, sessionId: String, token: String, mode: Str
                 } else if (!accepted) {
                     Button(onClick = {
                         verifyStatus = null; livenessFail = null; markingDone = false
-                        livenessFrames = emptyList(); detector.start(); livenessEvent.value = LivenessEvent.Idle
+                        capturedFrames.clear(); detector.start(); livenessEvent.value = LivenessEvent.Idle
                     }, modifier = Modifier.fillMaxWidth().height(52.dp), shape = RoundedCornerShape(10.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = GBlue)) {
                         Text("Try Again", fontWeight = FontWeight.Bold)
@@ -193,7 +223,7 @@ fun FaceCameraScreen(userId: String, sessionId: String, token: String, mode: Str
             if (livenessFail != null) {
                 StatusCard(livenessFail!!, Color.Red)
                 Spacer(Modifier.height(16.dp))
-                Button(onClick = { livenessFail = null; livenessFrames = emptyList(); detector.start(); livenessEvent.value = LivenessEvent.Idle },
+                Button(onClick = { livenessFail = null; capturedFrames.clear(); detector.start(); livenessEvent.value = LivenessEvent.Idle },
                     modifier = Modifier.fillMaxWidth().height(52.dp), shape = RoundedCornerShape(10.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = GBlue)) {
                     Text("Retry", fontWeight = FontWeight.Bold)
@@ -218,13 +248,17 @@ fun FaceCameraScreen(userId: String, sessionId: String, token: String, mode: Str
             }
             Spacer(Modifier.height(12.dp))
 
-            // Camera + oval overlay
+            // Camera
             Box(modifier = Modifier.fillMaxWidth().aspectRatio(0.85f)) {
-                CameraWithAnalysis(useFrontCamera = true,
-                    modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(16.dp))) { imageProxy ->
+                CameraWithAnalysis(
+                    useFrontCamera = true,
+                    modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(16.dp)),
+                    onFrameCaptured = { b64 ->
+                        if (capturedFrames.size < 3) capturedFrames.add(b64)
+                    }
+                ) { imageProxy ->
                     analyzer.analyze(imageProxy)
                 }
-                FaceOvalOverlay(modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(16.dp)))
             }
 
             if (loading) {
@@ -276,6 +310,129 @@ fun ResultCard(icon: String, label: String, color: Color, loading: Boolean) {
             Text(icon, fontSize = 48.sp, color = color)
             Spacer(Modifier.height(8.dp))
             Text(label, fontSize = 16.sp, fontWeight = FontWeight.Bold, color = color, textAlign = TextAlign.Center)
+        }
+    }
+}
+
+// ── Liveness Test Screen (debug only — no backend calls) ─────────────────────
+@Composable
+fun LivenessTestScreen(onBack: () -> Unit) {
+    var promptText   by remember { mutableStateOf("Position your face in the oval") }
+    var stepText     by remember { mutableStateOf("") }
+    var progressFrac by remember { mutableStateOf(0f) }
+    var livenessFail by remember { mutableStateOf<String?>(null) }
+    var livenessOk   by remember { mutableStateOf(false) }
+
+    val livenessEvent = remember { mutableStateOf<LivenessEvent>(LivenessEvent.Idle) }
+
+    val detector = remember {
+        LivenessDetector(
+            onChallengeChanged = { challenge, index, total ->
+                livenessEvent.value = LivenessEvent.PromptChanged(challenge.instruction, index, total)
+            },
+            onComplete = { result ->
+                if (result.isLive)
+                    livenessEvent.value = LivenessEvent.Success(emptyList(), emptyList())
+                else
+                    livenessEvent.value = LivenessEvent.Failed(result.failureReason ?: "Liveness check failed.")
+            },
+            challengeCount     = 2,
+            challengeTimeoutMs = 6000L
+        )
+    }
+
+    val analyzer = remember { FaceAnalyzer { face -> detector.processFace(face) } }
+
+    LaunchedEffect(Unit) { detector.start() }
+
+    LaunchedEffect(livenessEvent.value) {
+        when (val event = livenessEvent.value) {
+            is LivenessEvent.PromptChanged -> {
+                promptText   = event.text
+                stepText     = "Step ${event.index} of ${event.total}"
+                progressFrac = (event.index - 1f) / event.total
+            }
+            is LivenessEvent.Success -> { livenessOk = true }
+            is LivenessEvent.Failed  -> { livenessFail = event.reason }
+            is LivenessEvent.Idle    -> {}
+        }
+    }
+
+    WithCameraPermission {
+        Column(
+            modifier = Modifier.fillMaxSize().background(BGGray).padding(horizontal = 24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Spacer(Modifier.height(16.dp))
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = onBack) { Text("← Back", color = GBlue) }
+                Text("Liveness Test", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            }
+            Spacer(Modifier.height(8.dp))
+
+            // Success
+            if (livenessOk) {
+                Spacer(Modifier.height(32.dp))
+                ResultCard("✓", "Liveness Successful!", GGreen, false)
+                Spacer(Modifier.height(24.dp))
+                Button(
+                    onClick = {
+                        livenessOk = false; livenessFail = null
+                        livenessEvent.value = LivenessEvent.Idle; detector.start()
+                    },
+                    modifier = Modifier.fillMaxWidth().height(52.dp),
+                    shape = RoundedCornerShape(10.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = GBlue)
+                ) { Text("Test Again", fontWeight = FontWeight.Bold) }
+                return@WithCameraPermission
+            }
+
+            // Failed
+            if (livenessFail != null) {
+                Spacer(Modifier.height(32.dp))
+                StatusCard(livenessFail!!, Color.Red)
+                Spacer(Modifier.height(16.dp))
+                Button(
+                    onClick = {
+                        livenessFail = null; livenessEvent.value = LivenessEvent.Idle; detector.start()
+                    },
+                    modifier = Modifier.fillMaxWidth().height(52.dp),
+                    shape = RoundedCornerShape(10.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = GBlue)
+                ) { Text("Retry", fontWeight = FontWeight.Bold) }
+                return@WithCameraPermission
+            }
+
+            // Progress
+            if (stepText.isNotBlank()) {
+                Text(stepText, fontSize = 12.sp, color = Color.Gray)
+                Spacer(Modifier.height(4.dp))
+                LinearProgressIndicator(
+                    progress = { progressFrac },
+                    modifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)),
+                    color = GBlue, trackColor = Color.LightGray
+                )
+                Spacer(Modifier.height(8.dp))
+            }
+
+            // Prompt
+            Box(
+                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
+                    .background(GBlue.copy(alpha = 0.10f)).padding(12.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(promptText, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+                    color = GBlue, textAlign = TextAlign.Center)
+            }
+            Spacer(Modifier.height(12.dp))
+
+            // Camera
+            Box(modifier = Modifier.fillMaxWidth().aspectRatio(0.85f)) {
+                CameraWithAnalysis(
+                    useFrontCamera = true,
+                    modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(16.dp))
+                ) { imageProxy -> analyzer.analyze(imageProxy) }
+            }
         }
     }
 }

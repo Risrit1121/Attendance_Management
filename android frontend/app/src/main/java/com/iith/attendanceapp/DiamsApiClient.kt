@@ -53,7 +53,7 @@ data class MarkAttendanceResult(val success: Boolean, val error: String = "")
 data class EnrollResponse(val status: String, val imageURL: String = "", val error: String = "")
 data class PhotoStatus(val enrolled: Boolean, val photoUrl: String = "",
     val isExpired: Boolean = false, val enrolledAt: Long = 0L)
-data class ProfCourse(val id: String, val name: String, val slot: String, val venue: String,
+data class ProfCourse(val id: String, val courseCode: String, val name: String, val slot: String, val venue: String,
     val schedules: List<ProfSchedule> = emptyList())
 data class ProfSchedule(val idx: Int, val scheduledDay: String, val startTime: String,
     val endTime: String, val method: String)
@@ -225,7 +225,9 @@ fun apiGetProfCourses(professorId: String, token: String, onResult: (List<ProfCo
                 val arr = JSONObject(str).getJSONArray("courses")
                 onResult((0 until arr.length()).map { i ->
                     val c = arr.getJSONObject(i)
-                    ProfCourse(c.optString("_id", c.optString("id", "")), c.optString("name"), c.optString("slot"), c.optString("venue"))
+                    val mongoId = c.optString("_id", c.optString("id", ""))
+                    val code = c.optString("courseCode", c.optString("code", mongoId))
+                    ProfCourse(mongoId, code, c.optString("name"), c.optString("slot"), c.optString("venue"))
                 }, "")
             } catch (e: Exception) { onResult(null, "Parse error: ${e.message}") }
         }
@@ -341,8 +343,9 @@ fun apiQrValidate(classId: String, hash: String, onResult: (Boolean) -> Unit) {
     val body = JSONObject().apply {
         put("class_id", classId)
         put("hash", hash)
-        put("timestamp", System.currentTimeMillis())
+        put("timestamp", System.currentTimeMillis() / 1000)  // seconds
     }.toString()
+    Log.d(TAG, "QrValidate → class_id=$classId hash=$hash body=$body")
     http.newCall(post("$BASE_URL/api/qr/validate", body)).enqueue(object : Callback {
         override fun onFailure(call: Call, e: IOException) = onResult(false)
         override fun onResponse(call: Call, response: Response) {

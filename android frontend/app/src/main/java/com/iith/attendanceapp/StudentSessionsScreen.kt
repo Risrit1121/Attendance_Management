@@ -211,12 +211,14 @@ fun CameraPreview(useFrontCamera: Boolean, modifier: Modifier = Modifier) {
 @androidx.annotation.OptIn(androidx.camera.core.ExperimentalGetImage::class)
 @Composable
 fun QRCameraScreen(session: ActiveSessionItem, onSuccess: () -> Unit) {
-    var validating   by remember { mutableStateOf(false) }
     var validated    by remember { mutableStateOf(false) }
+    var validating   by remember { mutableStateOf(false) }
     var errorMsg     by remember { mutableStateOf<String?>(null) }
     val context      = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val executor     = remember { java.util.concurrent.Executors.newSingleThreadExecutor() }
+    // AtomicBoolean so the analyzer thread sees the flag immediately without waiting for recomposition
+    val scanLock     = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
 
     // ML Kit barcode scanner
     val scanner = remember {
@@ -242,8 +244,7 @@ fun QRCameraScreen(session: ActiveSessionItem, onSuccess: () -> Unit) {
                         .build()
                         .also { ia ->
                             ia.setAnalyzer(executor) { imageProxy ->
-                                // Skip if already validating or validated
-                                if (validating || validated) { imageProxy.close(); return@setAnalyzer }
+                                if (scanLock.get()) { imageProxy.close(); return@setAnalyzer }
                                 val mediaImage = imageProxy.image
                                 if (mediaImage != null) {
                                     val image = com.google.mlkit.vision.common.InputImage
@@ -251,24 +252,13 @@ fun QRCameraScreen(session: ActiveSessionItem, onSuccess: () -> Unit) {
                                     scanner.process(image)
                                         .addOnSuccessListener { barcodes ->
                                             val qr = barcodes.firstOrNull()?.rawValue
-                                            if (qr != null && !validating && !validated) {
+                                            if (qr != null && scanLock.compareAndSet(false, true)) {
                                                 validating = true
                                                 errorMsg   = null
-                                                // QR encodes "class_id|hash"
-                                                val parts = qr.split("|")
-                                                if (parts.size == 2) {
-                                                    apiQrValidate(parts[0], parts[1]) { valid ->
-                                                        validating = false
-                                                        if (valid) validated = true
-                                                        else errorMsg = "Invalid QR. Please try again."
-                                                    }
-                                                } else {
-                                                    // Try using session.room as class_id with full QR as hash
-                                                    apiQrValidate(session.room, qr) { valid ->
-                                                        validating = false
-                                                        if (valid) validated = true
-                                                        else errorMsg = "Invalid QR. Please try again."
-                                                    }
+                                                apiQrValidate(session.room, qr) { valid ->
+                                                    validating = false
+                                                    if (valid) validated = true
+                                                    else { scanLock.set(false); errorMsg = "Invalid QR. Please try again." }
                                                 }
                                             }
                                         }
@@ -360,6 +350,9 @@ fun QRCameraScreen(session: ActiveSessionItem, onSuccess: () -> Unit) {
                     else -> {
                         Text("Point camera at the QR code shown by professor",
                             fontSize = 13.sp, color = Color.White, textAlign = TextAlign.Center)
+                        Spacer(Modifier.height(4.dp))
+                        Text("Class: ${session.room}",
+                            fontSize = 11.sp, color = Color.White.copy(alpha = 0.5f))
                     }
                 }
             }

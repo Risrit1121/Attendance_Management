@@ -1,5 +1,11 @@
 package com.iith.attendanceapp
 
+import androidx.compose.foundation.Image
+import androidx.compose.ui.graphics.asImageBitmap
+import android.graphics.Bitmap
+import android.graphics.Color as AndroidColor
+import com.google.zxing.BarcodeFormat
+import com.google.zxing.qrcode.QRCodeWriter
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -34,7 +40,7 @@ fun ProfQRSessionScreen(course: ProfCourse, token: String, onBack: () -> Unit) {
 
     LaunchedEffect(course.id) {
         loading = true
-        apiStartSession(course.id, "QRCode", token) { sess, err ->
+        apiStartSession(course.courseCode, "QRCode", token) { sess, err ->
             loading = false
             if (sess != null) { session = sess; timeLeft = sess.durationSeconds }
             else errorMsg = err
@@ -45,7 +51,7 @@ fun ProfQRSessionScreen(course: ProfCourse, token: String, onBack: () -> Unit) {
         if (session == null) return@LaunchedEffect
         while (true) {
             apiQrGenerate(course.venue, token) { result ->
-                if (result.hash.isNotBlank()) qrContent = "${course.venue}|${result.hash}"
+                if (result.hash.isNotBlank()) qrContent = result.hash
             }
             delay(5000)
         }
@@ -96,9 +102,21 @@ fun ProfQRSessionScreen(course: ProfCourse, token: String, onBack: () -> Unit) {
 
                 Box(modifier = Modifier.size(200.dp).clip(RoundedCornerShape(16.dp)).background(Color.White),
                     contentAlignment = Alignment.Center) {
-                    if (qrContent != null) Text(qrContent!!, fontSize = 10.sp, color = Color.Black,
-                        textAlign = TextAlign.Center, modifier = Modifier.padding(8.dp))
-                    else Text("Generating QR...", color = Color.Gray)
+                    if (qrContent != null) {
+                        val qrBitmap = remember(qrContent) {
+                            try {
+                                val bits = QRCodeWriter().encode(qrContent, BarcodeFormat.QR_CODE, 512, 512)
+                                val bmp = Bitmap.createBitmap(512, 512, Bitmap.Config.RGB_565)
+                                for (x in 0 until 512) for (y in 0 until 512)
+                                    bmp.setPixel(x, y, if (bits[x, y]) AndroidColor.BLACK else AndroidColor.WHITE)
+                                bmp
+                            } catch (e: Exception) { null }
+                        }
+                        if (qrBitmap != null)
+                            Image(bitmap = qrBitmap.asImageBitmap(), contentDescription = "QR Code",
+                                modifier = Modifier.fillMaxSize().padding(8.dp))
+                        else Text("QR Error", color = Color.Red)
+                    } else Text("Generating QR...", color = Color.Gray)
                 }
                 Spacer(Modifier.height(8.dp))
                 Text("Display this to students", fontSize = 13.sp, color = Color.Gray)
@@ -133,7 +151,7 @@ fun ProfBLESessionScreen(course: ProfCourse, token: String, onBack: () -> Unit) 
 
     LaunchedEffect(course.id) {
         loading = true
-        apiStartSession(course.id, "BLE", token) { sess, err ->
+        apiStartSession(course.courseCode, "BLE", token) { sess, err ->
             loading = false
             if (sess != null) { session = sess; timeLeft = sess.durationSeconds }
             else errorMsg = err
@@ -217,7 +235,7 @@ fun ProfManualSessionScreen(course: ProfCourse, token: String, onBack: () -> Uni
     var successMsg  by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(course.id) {
-        apiStartSession(course.id, "Manual", token) { sess, err ->
+        apiStartSession(course.courseCode, "Manual", token) { sess, err ->
             if (sess != null) session = sess else errorMsg = err
         }
         apiGetCourseStudents(token, course.id) { list, err ->

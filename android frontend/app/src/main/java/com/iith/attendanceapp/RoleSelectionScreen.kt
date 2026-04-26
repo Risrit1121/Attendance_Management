@@ -24,7 +24,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 @Composable
-fun RoleSelectionScreen(onContinue: (UserRole) -> Unit) {
+fun RoleSelectionScreen(onContinue: (UserRole) -> Unit, onTestLiveness: () -> Unit) {
     var selected by remember { mutableStateOf(UserRole.STUDENT) }
 
     Column(
@@ -78,6 +78,16 @@ fun RoleSelectionScreen(onContinue: (UserRole) -> Unit) {
             colors = ButtonDefaults.buttonColors(containerColor = GBlue)
         ) {
             Text("Continue", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+        }
+
+        Spacer(Modifier.height(12.dp))
+
+        OutlinedButton(
+            onClick = onTestLiveness,
+            modifier = Modifier.fillMaxWidth().height(48.dp),
+            shape = RoundedCornerShape(10.dp)
+        ) {
+            Text("Test Liveness", fontSize = 14.sp, fontWeight = FontWeight.Medium)
         }
 
         Spacer(Modifier.weight(1f))
