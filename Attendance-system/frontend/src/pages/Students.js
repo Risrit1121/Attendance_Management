@@ -226,9 +226,10 @@ function HistoryModal({ student, course, onClose }) {
                         <div className="flex-1 min-w-0">
                           <p className="text-snow text-xs font-medium">
                             {l.scheduledTime
-                              ? new Date(toZ(l.scheduledTime)).toLocaleDateString("en-IN", {
+                              ? new Date(toZ(l.scheduledTime)).toLocaleString("en-IN", {
                                   timeZone: "Asia/Kolkata",
                                   day: "2-digit", month: "short",
+                                  hour: "2-digit", minute: "2-digit", hour12: true,
                                 })
                               : "—"}
                           </p>
@@ -417,6 +418,7 @@ export default function Students() {
   }, [user.user_id]);
 
   // ── Poll active sessions for selected course ───────────────────────────────
+  // Reduced from 5s to 10s to minimize server load
   useEffect(() => {
     if (!selected) return;
     const poll = async () => {
@@ -428,7 +430,7 @@ export default function Students() {
       }
     };
     poll();
-    const t = setInterval(poll, 5000);
+    const t = setInterval(poll, 10000);
     return () => clearInterval(t);
   }, [selected?.id]);
 

@@ -1,3 +1,7 @@
+// ── Log buffer must be initialised BEFORE anything else writes to console ─────
+const { initLogBuffer, getRecentLogs } = require('./services/logBuffer');
+initLogBuffer();
+
 require('dotenv').config();
 const express    = require('express');
 const mongoose   = require('mongoose');
@@ -11,21 +15,43 @@ const sessionRoutes       = require('./routes/sessions');
 const attendanceRoutes    = require('./routes/attendance');
 const analyticsRoutes     = require('./routes/analytics');
 const adminRoutes         = require('./routes/admin');
-const microserviceRoutes  = require('./routes/microservices'); // BLE + QR proxy (real service)
-const qrRoutes            = require('./routes/qr');            // local /decodeQR fallback only
-const beaconRoutes        = require('./routes/beacons');       // /getMinor, /validate, /admin/beacons
+const microserviceRoutes  = require('./routes/microservices');
+const qrRoutes            = require('./routes/qr');
+const beaconRoutes        = require('./routes/beacons');
 const studentRoutes       = require('./routes/student');
 
 const { startAllJobs } = require('./jobs');
+const { authenticate, authorize } = require('./middleware/auth');
 
 const app = express();
 
 app.set('trust proxy', 1);
+app.use(express.json());
+
+// ── Request logger ────────────────────────────────────────────────────────────
+app.use((req, res, next) => {
+  const start = Date.now();
+  const ip =
+    (req.headers['x-forwarded-for'] || '').split(',')[0].trim() ||
+    req.socket.remoteAddress;
+
+  console.log(`➡️  ${req.method} ${req.originalUrl} | IP: ${ip}`);
+  if (req.originalUrl === '/login' && req.method === 'POST') {
+    console.log('📦 LOGIN BODY:', {
+      email:    req.body.email,
+      password: req.body.password ? '***' : undefined,
+    });
+  }
+  res.on('finish', () => {
+    const time = Date.now() - start;
+    console.log(`⬅️  ${res.statusCode} ${req.method} ${req.originalUrl} (${time}ms)`);
+  });
+  next();
+});
 
 // ── Security ──────────────────────────────────────────────────────────────────
 app.use(helmet());
 app.use(cors({ origin: process.env.FRONTEND_URL || '*' }));
-app.use(express.json());
 
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20,
   message: { error: 'Too many login attempts' } });
@@ -36,34 +62,24 @@ const limiter = rateLimit({ windowMs: 60 * 1000, max: 300,
 app.use(limiter);
 
 // ── Routes ────────────────────────────────────────────────────────────────────
-//
-// ORDER MATTERS:
-//  microserviceRoutes is mounted BEFORE qrRoutes so that:
-//    GET  /getQR/:sessionId  → microservice proxy (with service fallback)
-//    POST /ble/validate      → microservice proxy (with DB fallback)
-//    POST /qr/validate       → microservice proxy (with HMAC fallback)
-//  are all handled by microservices.js.
-//
-//  qrRoutes only exposes /decodeQR (local HMAC verify), no duplicate /getQR.
-//
-//  beaconRoutes exposes /getMinor?major= and /validate?major=&minor= for ESP32
-//  and the admin /admin/beacons endpoints.  These are DB-only routes that do NOT
-//  call the BLE microservice (the microservice proxy for /getMinor is also in
-//  microserviceRoutes).  Since both beaconRoutes and microserviceRoutes define
-//  GET /getMinor, microserviceRoutes (mounted first) wins — beaconRoutes'
-//  /getMinor is shadowed.  This is intentional: the ESP32 always gets the
-//  microservice-backed minor.
-//
 app.use('/',          authRoutes);
 app.use('/',          courseRoutes);
 app.use('/',          sessionRoutes);
 app.use('/',          attendanceRoutes);
 app.use('/analytics', analyticsRoutes);
 app.use('/admin',     adminRoutes);
-app.use('/',          microserviceRoutes); // /getMinor, /ble/validate, /getQR/:id, /qr/validate, /validate
-app.use('/',          qrRoutes);           // /decodeQR only (local HMAC verify, no /getQR duplicate)
-app.use('/',          beaconRoutes);       // /admin/beacons CRUD
+app.use('/',          microserviceRoutes);
+app.use('/',          qrRoutes);
+app.use('/',          beaconRoutes);
 app.use('/student',   studentRoutes);
+
+// ── GET /admin/logs ───────────────────────────────────────────────────────────
+// Returns the last N lines from the in-process log buffer.
+// ?n=150 (default) up to max 500. Admin-only.
+app.get('/admin/logs', authenticate, authorize('admin'), (req, res) => {
+  const n = Math.min(parseInt(req.query.n || '150', 10), 500);
+  res.json(getRecentLogs(n));
+});
 
 // ── Health ────────────────────────────────────────────────────────────────────
 app.get('/health', (_, res) => res.json({
