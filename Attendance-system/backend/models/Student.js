@@ -26,6 +26,10 @@ const StudentSchema = new mongoose.Schema({
     unique: true,
     required: true
   },
+  // imageLastUpdated: {
+  //   type: Date,
+  //   default: Date.now
+  // },
   createdAt: {
     type: Date,
     default: Date.now
