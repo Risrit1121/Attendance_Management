@@ -50,6 +50,9 @@ fun StudentTabView(
         }
     }
 
+    // Notification poller — runs in background while app is open
+    StudentNotificationPoller(userId = userId, token = token)
+
     // Camera screen renders full screen — completely outside the bottom sheet
     if (showCamera) {
         PhotoCaptureFullScreen(
@@ -110,7 +113,7 @@ fun StudentTabView(
     ) { padding ->
         NavHost(navController, startDestination = "dashboard", modifier = Modifier.padding(padding)) {
             composable("dashboard") { StudentDashboardScreen(userId = userId, token = token) }
-            composable("sessions")  { StudentSessionsScreen(userId = userId, token = token) }
+            composable("sessions")  { StudentSessionsScreen(userId = userId, email = email, token = token) }
         }
     }
 

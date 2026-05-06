@@ -33,7 +33,7 @@ import kotlinx.coroutines.delay
 @Composable
 fun LoginScreen(
     role: UserRole,
-    onLogin: (userId: String, userName: String, email: String, token: String) -> Unit
+    onLogin: (userId: String, userName: String, email: String, token: String, role: String) -> Unit
 ) {
     var username      by remember { mutableStateOf("") }
     var password      by remember { mutableStateOf("") }
@@ -53,7 +53,6 @@ fun LoginScreen(
     val roleLabel = when (role) {
         UserRole.STUDENT   -> "Student"
         UserRole.PROFESSOR -> "Professor"
-        UserRole.ADMIN     -> "Admin"
     }
 
     fun doLogin() {
@@ -67,7 +66,7 @@ fun LoginScreen(
                     val afm = context.getSystemService(AutofillManager::class.java)
                     afm?.commit()
                 }
-                onLogin(result.userId, result.name, result.email, result.token)
+                onLogin(result.userId, result.name, result.email, result.token, result.role)
             } else {
                 errorMsg = result.error.ifBlank { "Login failed. Check credentials." }
             }

@@ -15,6 +15,7 @@ val BGGray  = Color(0xFFF0F0F0)
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        createNotificationChannels(this)
         setContent { AttendanceApp() }
     }
 }

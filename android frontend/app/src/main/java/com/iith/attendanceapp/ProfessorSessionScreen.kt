@@ -24,6 +24,7 @@ private sealed class ProfCourseScreen {
     data class QR(val course: ProfCourse) : ProfCourseScreen()
     data class BLE(val course: ProfCourse) : ProfCourseScreen()
     data class Manual(val course: ProfCourse) : ProfCourseScreen()
+    data class Schedule(val course: ProfCourse) : ProfCourseScreen()
 }
 
 @Composable
@@ -33,14 +34,16 @@ fun ProfessorSessionScreen(professorId: String, token: String) {
     when (val s = screen) {
         is ProfCourseScreen.List       -> CourseListScreen(professorId, token) { screen = ProfCourseScreen.ModeSelect(it) }
         is ProfCourseScreen.ModeSelect -> ModeSelectScreen(s.course,
-            onQR     = { screen = ProfCourseScreen.QR(s.course) },
-            onBLE    = { screen = ProfCourseScreen.BLE(s.course) },
-            onManual = { screen = ProfCourseScreen.Manual(s.course) },
-            onBack   = { screen = ProfCourseScreen.List }
+            onQR       = { screen = ProfCourseScreen.QR(s.course) },
+            onBLE      = { screen = ProfCourseScreen.BLE(s.course) },
+            onManual   = { screen = ProfCourseScreen.Manual(s.course) },
+            onSchedule = { screen = ProfCourseScreen.Schedule(s.course) },
+            onBack     = { screen = ProfCourseScreen.List }
         )
-        is ProfCourseScreen.QR     -> ProfQRSessionScreen(s.course, token)     { screen = ProfCourseScreen.ModeSelect(s.course) }
-        is ProfCourseScreen.BLE    -> ProfBLESessionScreen(s.course, token)    { screen = ProfCourseScreen.ModeSelect(s.course) }
-        is ProfCourseScreen.Manual -> ProfManualSessionScreen(s.course, token) { screen = ProfCourseScreen.ModeSelect(s.course) }
+        is ProfCourseScreen.QR       -> ProfQRSessionScreen(s.course, professorId, token)     { screen = ProfCourseScreen.ModeSelect(s.course) }
+        is ProfCourseScreen.BLE      -> ProfBLESessionScreen(s.course, professorId, token)    { screen = ProfCourseScreen.ModeSelect(s.course) }
+        is ProfCourseScreen.Manual   -> ProfManualSessionScreen(s.course, professorId, token) { screen = ProfCourseScreen.ModeSelect(s.course) }
+        is ProfCourseScreen.Schedule -> ProfScheduleScreen(s.course, token, professorId) { screen = ProfCourseScreen.ModeSelect(s.course) }
     }
 }
 
@@ -84,7 +87,8 @@ private fun CourseListScreen(professorId: String, token: String, onSelect: (Prof
 }
 
 @Composable
-private fun ModeSelectScreen(course: ProfCourse, onQR: () -> Unit, onBLE: () -> Unit, onManual: () -> Unit, onBack: () -> Unit) {
+private fun ModeSelectScreen(course: ProfCourse, onQR: () -> Unit, onBLE: () -> Unit,
+    onManual: () -> Unit, onSchedule: () -> Unit, onBack: () -> Unit) {
     Column(modifier = Modifier.fillMaxSize().background(BGGray).verticalScroll(rememberScrollState()).padding(vertical = 16.dp)) {
         TextButton(onClick = onBack, modifier = Modifier.padding(start = 8.dp)) { Text("← Back", color = GBlue) }
         BannerCard(course.name, courseBannerColors[0], Modifier.padding(horizontal = 16.dp)) {
@@ -93,11 +97,13 @@ private fun ModeSelectScreen(course: ProfCourse, onQR: () -> Unit, onBLE: () -> 
         Spacer(Modifier.height(24.dp))
         Text("Choose Attendance Mode", fontWeight = FontWeight.Bold, fontSize = 16.sp, modifier = Modifier.padding(horizontal = 16.dp))
         Spacer(Modifier.height(14.dp))
-        ModeCard("QR Code", "Students scan a dynamic QR code displayed by you",                GBlue,   onQR)
+        ModeCard("QR Code",   "Students scan a dynamic QR code displayed by you",                GBlue,   onQR)
         Spacer(Modifier.height(12.dp))
-        ModeCard("BLE",     "Bluetooth beacon detects students automatically in the classroom", GPurple, onBLE)
+        ModeCard("BLE",       "Bluetooth beacon detects students automatically in the classroom", GPurple, onBLE)
         Spacer(Modifier.height(12.dp))
-        ModeCard("Manual",  "Mark attendance manually from the student list",                   GOrange, onManual)
+        ModeCard("Manual",    "Mark attendance manually from the student list",                   GOrange, onManual)
+        Spacer(Modifier.height(12.dp))
+        ModeCard("Schedules", "Manage auto-start schedules for this course",                      GGreen,  onSchedule)
     }
 }
 

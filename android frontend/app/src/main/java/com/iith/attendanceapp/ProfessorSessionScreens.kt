@@ -30,7 +30,7 @@ import kotlinx.coroutines.delay
 // ── QR Session Screen ─────────────────────────────────────────────────────────
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ProfQRSessionScreen(course: ProfCourse, token: String, onBack: () -> Unit) {
+fun ProfQRSessionScreen(course: ProfCourse, professorId: String, token: String, onBack: () -> Unit) {
     var session    by remember { mutableStateOf<ProfSession?>(null) }
     var qrContent  by remember { mutableStateOf<String?>(null) }
     var attendance by remember { mutableStateOf<List<LiveAttendanceEntry>>(emptyList()) }
@@ -40,10 +40,17 @@ fun ProfQRSessionScreen(course: ProfCourse, token: String, onBack: () -> Unit) {
 
     LaunchedEffect(course.id) {
         loading = true
-        apiStartSession(course.courseCode, "QRCode", token) { sess, err ->
-            loading = false
-            if (sess != null) { session = sess; timeLeft = sess.durationSeconds }
-            else errorMsg = err
+        // iOS approach: check for existing session first, only start if none found
+        apiGetProfActiveSession(professorId, course.courseCode, token) { existing ->
+            if (existing != null) {
+                loading = false; session = existing; timeLeft = existing.durationSeconds
+            } else {
+                apiStartSession(course.courseCode, "QRCode", token) { sess, err ->
+                    loading = false
+                    if (sess != null) { session = sess; timeLeft = sess.durationSeconds }
+                    else errorMsg = err
+                }
+            }
         }
     }
 
@@ -92,7 +99,8 @@ fun ProfQRSessionScreen(course: ProfCourse, token: String, onBack: () -> Unit) {
             Column(modifier = Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(16.dp),
                 horizontalAlignment = Alignment.CenterHorizontally) {
                 Box(contentAlignment = Alignment.Center, modifier = Modifier.size(110.dp)) {
-                    CircularProgressIndicator(progress = { timeLeft.toFloat() / session!!.durationSeconds },
+                    val dur = session?.durationSeconds?.takeIf { it > 0 } ?: 300
+                    CircularProgressIndicator(progress = { timeLeft.toFloat() / dur },
                         modifier = Modifier.size(110.dp), color = GBlue, trackColor = Color.LightGray, strokeWidth = 8.dp)
                     Text("%d:%02d".format(timeLeft / 60, timeLeft % 60), fontSize = 22.sp, fontWeight = FontWeight.Bold)
                 }
@@ -139,7 +147,7 @@ fun ProfQRSessionScreen(course: ProfCourse, token: String, onBack: () -> Unit) {
 
 // ── BLE Session Screen ────────────────────────────────────────────────────────
 @Composable
-fun ProfBLESessionScreen(course: ProfCourse, token: String, onBack: () -> Unit) {
+fun ProfBLESessionScreen(course: ProfCourse, professorId: String, token: String, onBack: () -> Unit) {
     var session    by remember { mutableStateOf<ProfSession?>(null) }
     var attendance by remember { mutableStateOf<List<LiveAttendanceEntry>>(emptyList()) }
     var loading    by remember { mutableStateOf(false) }
@@ -151,10 +159,17 @@ fun ProfBLESessionScreen(course: ProfCourse, token: String, onBack: () -> Unit) 
 
     LaunchedEffect(course.id) {
         loading = true
-        apiStartSession(course.courseCode, "BLE", token) { sess, err ->
-            loading = false
-            if (sess != null) { session = sess; timeLeft = sess.durationSeconds }
-            else errorMsg = err
+        // iOS approach: check for existing session first, only start if none found
+        apiGetProfActiveSession(professorId, course.courseCode, token) { existing ->
+            if (existing != null) {
+                loading = false; session = existing; timeLeft = existing.durationSeconds
+            } else {
+                apiStartSession(course.courseCode, "BLE", token) { sess, err ->
+                    loading = false
+                    if (sess != null) { session = sess; timeLeft = sess.durationSeconds }
+                    else errorMsg = err
+                }
+            }
         }
     }
 
@@ -193,7 +208,8 @@ fun ProfBLESessionScreen(course: ProfCourse, token: String, onBack: () -> Unit) 
             Column(modifier = Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(16.dp),
                 horizontalAlignment = Alignment.CenterHorizontally) {
                 Box(contentAlignment = Alignment.Center, modifier = Modifier.size(120.dp)) {
-                    CircularProgressIndicator(progress = { timeLeft.toFloat() / session!!.durationSeconds },
+                    val dur = session?.durationSeconds?.takeIf { it > 0 } ?: 300
+                    CircularProgressIndicator(progress = { timeLeft.toFloat() / dur },
                         modifier = Modifier.size(120.dp), color = GPurple, trackColor = Color.LightGray, strokeWidth = 8.dp)
                     Text("%d:%02d".format(timeLeft / 60, timeLeft % 60), fontSize = 24.sp, fontWeight = FontWeight.Bold)
                 }
@@ -226,8 +242,9 @@ fun ProfBLESessionScreen(course: ProfCourse, token: String, onBack: () -> Unit) 
 data class StudentEntry(val id: String, val name: String, val roll: String, var present: Boolean = false)
 
 @Composable
-fun ProfManualSessionScreen(course: ProfCourse, token: String, onBack: () -> Unit) {
+fun ProfManualSessionScreen(course: ProfCourse, professorId: String, token: String, onBack: () -> Unit) {
     var session     by remember { mutableStateOf<ProfSession?>(null) }
+    var sessionLoading by remember { mutableStateOf(true) }
     var students    by remember { mutableStateOf<List<StudentEntry>>(emptyList()) }
     var loading     by remember { mutableStateOf(true) }
     var submitting  by remember { mutableStateOf(false) }
@@ -235,10 +252,18 @@ fun ProfManualSessionScreen(course: ProfCourse, token: String, onBack: () -> Uni
     var successMsg  by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(course.id) {
-        apiStartSession(course.courseCode, "Manual", token) { sess, err ->
-            if (sess != null) session = sess else errorMsg = err
+        // iOS approach: check for existing session first, only start if none found
+        apiGetProfActiveSession(professorId, course.courseCode, token) { existing ->
+            if (existing != null) {
+                session = existing; sessionLoading = false
+            } else {
+                apiStartSession(course.courseCode, "Manual", token) { sess, err ->
+                    if (sess != null) session = sess else errorMsg = err
+                    sessionLoading = false
+                }
+            }
         }
-        apiGetCourseStudents(token, course.id) { list, err ->
+        apiGetCourseStudents(token, professorId, course.courseCode) { list, err ->
             loading = false
             if (list != null) students = list.map { StudentEntry(it.id, it.name, it.email) }
             else errorMsg = err
@@ -296,26 +321,26 @@ fun ProfManualSessionScreen(course: ProfCourse, token: String, onBack: () -> Uni
                 Button(
                     onClick = {
                         val sid = session?.sessionId
-                        if (sid == null) { errorMsg = "Session not started yet."; return@Button }
+                        if (sid == null) { errorMsg = "Session not ready yet, please wait."; return@Button }
                         val presentIds = students.filter { it.present }.map { it.id }
                         if (presentIds.isEmpty()) { errorMsg = "No students marked present."; return@Button }
                         submitting = true; errorMsg = null
-                        apiManualAttendanceBulk(token, sid, presentIds) { ok, err ->
+                        apiProfManualAttendance(sid, presentIds, token) { ok, err ->
                             submitting = false
                             if (ok) successMsg = "Attendance submitted for ${presentIds.size} students."
                             else errorMsg = err
                         }
                     },
-                    enabled  = !submitting,
+                    enabled  = !submitting && !sessionLoading,
                     modifier = Modifier.fillMaxWidth().height(52.dp),
                     shape    = RoundedCornerShape(10.dp),
                     colors   = ButtonDefaults.buttonColors(containerColor = GBlue)
                 ) {
-                    if (submitting) {
-                        CircularProgressIndicator(color = Color.White, modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
-                        Spacer(Modifier.width(8.dp))
+                    when {
+                        submitting    -> { CircularProgressIndicator(color = Color.White, modifier = Modifier.size(20.dp), strokeWidth = 2.dp); Spacer(Modifier.width(8.dp)); Text("Submitting...") }
+                        sessionLoading -> { CircularProgressIndicator(color = Color.White, modifier = Modifier.size(20.dp), strokeWidth = 2.dp); Spacer(Modifier.width(8.dp)); Text("Starting session...") }
+                        else          -> Text("Submit Attendance", fontWeight = FontWeight.Bold)
                     }
-                    Text("Submit Attendance", fontWeight = FontWeight.Bold)
                 }
             }
         }

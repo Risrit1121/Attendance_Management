@@ -75,7 +75,7 @@ private fun CourseAnalyticsDetailScreen(course: ProfCourse, professorId: String,
     var refreshing by remember { mutableStateOf(false) }
 
     fun load() {
-        apiGetCourseAnalytics(professorId, course.id, token) { result, err ->
+        apiGetCourseAnalytics(professorId, course.courseCode, token) { result, err ->
             loading = false; refreshing = false
             if (result != null) records = result else errorMsg = err
         }

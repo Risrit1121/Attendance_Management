@@ -38,7 +38,7 @@ import kotlinx.coroutines.delay
 // ── Sessions list ─────────────────────────────────────────────────────────────
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun StudentSessionsScreen(userId: String, token: String) {
+fun StudentSessionsScreen(userId: String, email: String, token: String) {
     var sessions       by remember { mutableStateOf<List<ActiveSessionItem>>(emptyList()) }
     var loading        by remember { mutableStateOf(true) }
     var errorMsg       by remember { mutableStateOf<String?>(null) }
@@ -58,6 +58,7 @@ fun StudentSessionsScreen(userId: String, token: String) {
         MarkAttendanceFlow(
             session = markingSession!!,
             userId  = userId,
+            email   = email,
             token   = token,
             onDone  = { markingSession = null; refreshing = true; load() }
         )
@@ -134,9 +135,49 @@ fun LiveSessionCard(session: ActiveSessionItem, onMark: () -> Unit) {
 
 // ── Mark Attendance Flow ──────────────────────────────────────────────────────
 @Composable
-fun MarkAttendanceFlow(session: ActiveSessionItem, userId: String, token: String, onDone: () -> Unit) {
-    var step  by remember { mutableStateOf(1) }
-    val isBLE = session.mode == "BLE"
+fun MarkAttendanceFlow(session: ActiveSessionItem, userId: String, email: String, token: String, onDone: () -> Unit) {
+    var step    by remember { mutableStateOf(1) }
+    val isBLE   = session.mode == "BLE"
+    val expiryMs = session.startedAt + session.durationSeconds * 1000L
+    var expired by remember {
+        mutableStateOf(System.currentTimeMillis() >= expiryMs)
+    }
+
+    // Expiry timer — fires once when the session window closes
+    LaunchedEffect(session.sessionId) {
+        val remaining = expiryMs - System.currentTimeMillis()
+        if (remaining > 0) {
+            kotlinx.coroutines.delay(remaining)
+            expired = true
+        }
+    }
+
+    if (expired) {
+        // Session expired screen — matches iOS expiredView
+        Column(
+            modifier = Modifier.fillMaxSize().background(BGGray),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Text("⏱", fontSize = 64.sp)
+            Spacer(Modifier.height(16.dp))
+            Text("Session Expired", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "The attendance window has closed.\nYour attendance was not recorded.",
+                fontSize = 14.sp, color = Color.Gray, textAlign = TextAlign.Center,
+                modifier = Modifier.padding(horizontal = 32.dp)
+            )
+            Spacer(Modifier.height(24.dp))
+            Button(
+                onClick = onDone,
+                modifier = Modifier.padding(horizontal = 40.dp).fillMaxWidth().height(52.dp),
+                shape = RoundedCornerShape(10.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = GBlue)
+            ) { Text("Back to Sessions", fontWeight = FontWeight.Bold) }
+        }
+        return
+    }
 
     Column(modifier = Modifier.fillMaxSize().background(BGGray), horizontalAlignment = Alignment.CenterHorizontally) {
         Spacer(Modifier.height(24.dp))
@@ -149,9 +190,10 @@ fun MarkAttendanceFlow(session: ActiveSessionItem, userId: String, token: String
 
         if (step == 1) {
             if (isBLE) StudentBLEScreen(session = session, onSuccess = { step = 2 })
-            else QRCameraScreen(session = session!!, onSuccess = { step = 2 })
+            else QRCameraScreen(session = session, onSuccess = { step = 2 })
         } else {
-            FaceCameraScreen(userId = userId, sessionId = session.sessionId, token = token, mode = session.mode, onSuccess = onDone)
+            // Pass email as userId — gateway strips domain to get face recognition user_id
+            FaceCameraScreen(userId = email, sessionId = session.sessionId, token = token, mode = session.mode, onSuccess = onDone)
         }
     }
 }
@@ -255,7 +297,11 @@ fun QRCameraScreen(session: ActiveSessionItem, onSuccess: () -> Unit) {
                                             if (qr != null && scanLock.compareAndSet(false, true)) {
                                                 validating = true
                                                 errorMsg   = null
-                                                apiQrValidate(session.room, qr) { valid ->
+                                                // iOS parses "room|hash" from QR — use session.room as class_id
+                                                val parts = qr.split("|")
+                                                val classId = if (parts.size == 2) parts[0] else session.room
+                                                val hash    = if (parts.size == 2) parts[1] else qr
+                                                apiQrValidate(classId, hash) { valid ->
                                                     validating = false
                                                     if (valid) validated = true
                                                     else { scanLock.set(false); errorMsg = "Invalid QR. Please try again." }
@@ -351,7 +397,7 @@ fun QRCameraScreen(session: ActiveSessionItem, onSuccess: () -> Unit) {
                         Text("Point camera at the QR code shown by professor",
                             fontSize = 13.sp, color = Color.White, textAlign = TextAlign.Center)
                         Spacer(Modifier.height(4.dp))
-                        Text("Class: ${session.room}",
+                        Text("Class: ${session.courseCode}",
                             fontSize = 11.sp, color = Color.White.copy(alpha = 0.5f))
                     }
                 }
@@ -366,12 +412,15 @@ private const val TARGET_UUID = "49495448-2d41-5454-454e-44414e434520"
 @Composable
 fun StudentBLEScreen(session: ActiveSessionItem, onSuccess: () -> Unit) {
     val expiryMs = session.startedAt + session.durationSeconds * 1000L
-    var timeLeft  by remember { mutableStateOf(((expiryMs - System.currentTimeMillis()) / 1000).toInt().coerceAtLeast(0)) }
-    var scanning  by remember { mutableStateOf(false) }
+    var timeLeft   by remember { mutableStateOf(((expiryMs - System.currentTimeMillis()) / 1000).toInt().coerceAtLeast(0)) }
+    var scanning   by remember { mutableStateOf(false) }
     var validating by remember { mutableStateOf(false) }
-    var results   by remember { mutableStateOf<List<BleBeaconResult>>(emptyList()) }
-    var errorMsg  by remember { mutableStateOf<String?>(null) }
-    val context   = LocalContext.current
+    var fetchingMajor by remember { mutableStateOf(false) }
+    var results    by remember { mutableStateOf<List<BleBeaconResult>>(emptyList()) }
+    var errorMsg   by remember { mutableStateOf<String?>(null) }
+    // expectedMajor fetched from backend — used to filter beacons (matching iOS)
+    var expectedMajor by remember { mutableStateOf<String?>(null) }
+    val context    = LocalContext.current
 
     val blePermissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
         arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.ACCESS_FINE_LOCATION)
@@ -417,27 +466,34 @@ fun StudentBLEScreen(session: ActiveSessionItem, onSuccess: () -> Unit) {
                 if (!permissionsGranted) { permLauncher.launch(blePermissions); return@Button }
                 val btManager = context.getSystemService(android.content.Context.BLUETOOTH_SERVICE) as BluetoothManager
                 if (btManager.adapter?.isEnabled == false) { errorMsg = "Bluetooth is turned off."; return@Button }
-                scanning = true; errorMsg = null; results = emptyList()
-                startBleScan(context, TARGET_UUID) { found ->
-                    scanning = false
-                    if (found.isEmpty()) { errorMsg = "No beacon found with the target UUID."; return@startBleScan }
-                    results = found
-                    validating = true
-                    apiBleValidate(classId = session.room, beacons = found) { validateResult ->
-                        validating = false
-                        if (!validateResult.valid) { errorMsg = "BLE validation failed: not in the correct classroom."; results = emptyList() }
+                scanning = false; errorMsg = null; results = emptyList(); fetchingMajor = true
+                // iOS: fetch major from backend first, then scan
+                apiGetBeaconMajor(session.room) { major ->
+                    expectedMajor = major  // null if fetch fails — scan without filter
+                    fetchingMajor = false; scanning = true
+                    startBleScan(context, TARGET_UUID, expectedMajor) { found ->
+                        scanning = false
+                        if (found.isEmpty()) { errorMsg = "No beacon found with the target UUID."; return@startBleScan }
+                        results = found
+                        validating = true
+                        // Send all raw readings — gateway computes median RSSI (matching iOS)
+                        apiBleValidate(classId = session.room, beacons = found) { validateResult ->
+                            validating = false
+                            if (!validateResult.valid) { errorMsg = "BLE validation failed: not in the correct classroom."; results = emptyList() }
+                        }
                     }
                 }
             },
-            enabled  = !scanning && !validating,
+            enabled  = !scanning && !validating && !fetchingMajor,
             modifier = Modifier.fillMaxWidth().height(52.dp),
             shape    = RoundedCornerShape(10.dp),
             colors   = ButtonDefaults.buttonColors(containerColor = GPurple)
         ) {
             when {
-                scanning   -> { CircularProgressIndicator(color = Color.White, modifier = Modifier.size(20.dp), strokeWidth = 2.dp); Spacer(Modifier.width(10.dp)); Text("Scanning for 3s...") }
-                validating -> { CircularProgressIndicator(color = Color.White, modifier = Modifier.size(20.dp), strokeWidth = 2.dp); Spacer(Modifier.width(10.dp)); Text("Validating...") }
-                else       -> Text("Scan", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                fetchingMajor -> { CircularProgressIndicator(color = Color.White, modifier = Modifier.size(20.dp), strokeWidth = 2.dp); Spacer(Modifier.width(10.dp)); Text("Fetching beacon info...") }
+                scanning      -> { CircularProgressIndicator(color = Color.White, modifier = Modifier.size(20.dp), strokeWidth = 2.dp); Spacer(Modifier.width(10.dp)); Text("Scanning for 3s...") }
+                validating    -> { CircularProgressIndicator(color = Color.White, modifier = Modifier.size(20.dp), strokeWidth = 2.dp); Spacer(Modifier.width(10.dp)); Text("Validating...") }
+                else          -> Text("Scan", fontWeight = FontWeight.Bold, fontSize = 16.sp)
             }
         }
 

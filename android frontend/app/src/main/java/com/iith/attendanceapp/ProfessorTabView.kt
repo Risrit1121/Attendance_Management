@@ -20,6 +20,9 @@ fun ProfessorTabView(userId: String, userName: String, token: String, onLogout: 
     var showProfile by remember { mutableStateOf(false) }
     var currentTab  by remember { mutableStateOf("session") }
 
+    // Notification poller — runs in background while app is open
+    ProfessorNotificationPoller(professorId = userId, token = token)
+
     Scaffold(
         topBar = {
             CenterAlignedTopAppBar(

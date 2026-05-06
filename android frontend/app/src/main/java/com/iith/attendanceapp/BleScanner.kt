@@ -64,6 +64,7 @@ private fun ByteArray.toHex() = joinToString(" ") { "%02x".format(it) }
 fun startBleScan(
     context: Context,
     targetUuid: String,
+    expectedMajor: String? = null,
     onResult: (List<BleBeaconResult>) -> Unit
 ) {
     val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
@@ -99,6 +100,9 @@ fun startBleScan(
             Log.d(TAG, "iBeacon — UUID: ${beacon.uuid} major: ${beacon.major} minor: ${beacon.minor}")
 
             if (!beacon.uuid.equals(targetUuid, ignoreCase = true)) return
+
+            // Filter by expected major if provided (matching iOS behaviour)
+            if (expectedMajor != null && beacon.major.toString() != expectedMajor) return
 
             Log.d(TAG, "TARGET MATCHED — major=${beacon.major} minor=${beacon.minor} rssi=${result.rssi}")
 

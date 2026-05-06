@@ -1,6 +1,8 @@
 package com.iith.attendanceapp
 
 import android.util.Log
+import android.os.Handler
+import android.os.Looper
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -11,8 +13,7 @@ import java.util.concurrent.TimeUnit
 
 private const val TAG = "DiamsApi"
 
-const val BASE_URL       = "https://diams-student-backend-app-gateway.onrender.com"
-const val FLASK_BASE_URL = "http://192.168.0.134:5000"
+const val BASE_URL = "https://diams-student-backend-app-gateway.onrender.com"
 
 private val http = OkHttpClient.Builder()
     .connectTimeout(60, TimeUnit.SECONDS)
@@ -30,15 +31,16 @@ private fun post(url: String, body: String, token: String = "") =
     Request.Builder().url(url).post(body.toRequestBody(JSON_MT))
         .apply { if (token.isNotBlank()) addHeader("Authorization", "Bearer $token") }.build()
 
-private fun put(url: String, body: String = "{}", token: String = "") =
-    Request.Builder().url(url).put(body.toRequestBody(JSON_MT))
-        .apply { if (token.isNotBlank()) addHeader("Authorization", "Bearer $token") }.build()
-
 private fun delete(url: String, token: String = "") =
     Request.Builder().url(url).delete()
         .apply { if (token.isNotBlank()) addHeader("Authorization", "Bearer $token") }.build()
 
+private fun patch(url: String, body: String, token: String = "") =
+    Request.Builder().url(url).patch(body.toRequestBody(JSON_MT))
+        .apply { if (token.isNotBlank()) addHeader("Authorization", "Bearer $token") }.build()
+
 private fun String.isHtml() = trimStart().startsWith("<")
+private fun main(block: () -> Unit) = Handler(Looper.getMainLooper()).post(block)
 
 // Data classes
 data class LoginResult(val success: Boolean, val token: String = "", val userId: String = "",
@@ -63,8 +65,6 @@ data class AttendanceRecord(val studentId: String, val name: String,
     val attended: Int, val total: Int, val percentage: Double)
 data class LiveAttendanceEntry(val studentId: String, val name: String,
     val verifiedVia: String, val timestamp: Long)
-data class AdminStats(val totalStudents: Int, val totalProfessors: Int,
-    val totalCourses: Int, val activeSessions: Int)
 data class AdminUser(val id: String, val name: String, val email: String, val role: String)
 
 // Auth
@@ -194,6 +194,19 @@ fun apiUpdatePhoto(studentId: String, frames: List<String>, token: String, onRes
     })
 }
 
+// BLE major lookup — GET /api/ble/major/:classroom
+fun apiGetBeaconMajor(classroom: String, onResult: (String?) -> Unit) {
+    http.newCall(get("$BASE_URL/api/ble/major/$classroom")).enqueue(object : Callback {
+        override fun onFailure(call: Call, e: IOException) { main { onResult(null) } }
+        override fun onResponse(call: Call, response: Response) {
+            val str = response.body?.string() ?: ""
+            Log.d(TAG, "BeaconMajor HTTP ${response.code}: $str")
+            try { main { onResult(JSONObject(str).optString("major", null)) } }
+            catch (e: Exception) { main { onResult(null) } }
+        }
+    })
+}
+
 // BLE validate
 fun apiBleValidate(classId: String, beacons: List<BleBeaconResult>, onResult: (BleValidateResult) -> Unit) {
     val body = JSONObject().apply {
@@ -234,22 +247,36 @@ fun apiGetProfCourses(professorId: String, token: String, onResult: (List<ProfCo
     })
 }
 
-// Start session
+// Start session — on 400/409 (already exists), recover by fetching the active session
 fun apiStartSession(courseCode: String, mode: String, token: String, onResult: (ProfSession?, String) -> Unit) {
     val body = JSONObject().apply { put("courseCode", courseCode); put("mode", mode) }.toString()
     http.newCall(post("$BASE_URL/api/professor/session/start", body, token)).enqueue(object : Callback {
-        override fun onFailure(call: Call, e: IOException) = onResult(null, e.message ?: "Network error")
+        override fun onFailure(call: Call, e: IOException) { main { onResult(null, e.message ?: "Network error") } }
         override fun onResponse(call: Call, response: Response) {
             val str = response.body?.string() ?: ""
             Log.d(TAG, "StartSession HTTP ${response.code}: $str")
-            if (response.code == 400) { onResult(null, "Active session already exists."); return }
+            if (response.code == 400 || response.code == 409) {
+                try {
+                    val json = JSONObject(str)
+                    val existingId = json.optString("session_id", "")
+                    if (existingId.isNotBlank()) {
+                        main { onResult(ProfSession(existingId, courseCode, mode,
+                            startedAt = System.currentTimeMillis(), durationSeconds = 300), "") }
+                        return
+                    }
+                } catch (_: Exception) {}
+                main { onResult(null, "ALREADY_EXISTS") }
+                return
+            }
             try {
-                val json = JSONObject(str); val s = json.optJSONObject("session") ?: json
-                onResult(ProfSession(s.optString("id", s.optString("sessionUID", s.optString("sessionId", ""))),
-                    s.optString("courseCode", courseCode), s.optString("mode", mode),
-                    s.optString("professorId", ""), s.optLong("startedAt", System.currentTimeMillis()),
-                    s.optInt("durationSeconds", 300)), "")
-            } catch (e: Exception) { onResult(null, "Parse error: ${e.message}") }
+                val json = JSONObject(str)
+                val s = json.optJSONObject("session") ?: json
+                val sid = s.optString("id", s.optString("sessionUID", s.optString("sessionId", "")))
+                main { onResult(ProfSession(sid, s.optString("courseCode", courseCode),
+                    s.optString("mode", mode), s.optString("professorId", ""),
+                    s.optLong("startedAt", System.currentTimeMillis()),
+                    s.optInt("durationSeconds", 300)), "") }
+            } catch (e: Exception) { main { onResult(null, "Parse error: ${e.message}") } }
         }
     })
 }
@@ -263,20 +290,23 @@ fun apiEndSession(sessionId: String, token: String, onResult: (Boolean, String) 
     })
 }
 
-// Active session
-fun apiGetProfActiveSession(professorId: String, token: String, onResult: (ProfSession?) -> Unit) {
+// Active session — fetches active session for a professor, returns first match for given courseCode
+fun apiGetProfActiveSession(professorId: String, courseCode: String, token: String, onResult: (ProfSession?) -> Unit) {
     http.newCall(get("$BASE_URL/api/professor/$professorId/activeSession", token)).enqueue(object : Callback {
-        override fun onFailure(call: Call, e: IOException) = onResult(null)
+        override fun onFailure(call: Call, e: IOException) { main { onResult(null) } }
         override fun onResponse(call: Call, response: Response) {
             val str = response.body?.string() ?: ""
+            Log.d(TAG, "ActiveSession HTTP ${response.code}: $str")
             try {
                 val json = JSONObject(str)
-                if (json.isNull("session")) { onResult(null); return }
-                val s = json.optJSONObject("session") ?: run { onResult(null); return }
-                onResult(ProfSession(s.optString("id", s.optString("sessionUID", s.optString("sessionId", ""))),
-                    s.optString("courseCode", ""), s.optString("mode", ""),
-                    s.optString("professorId", ""), s.optLong("startedAt", 0L), s.optInt("durationSeconds", 300)))
-            } catch (e: Exception) { onResult(null) }
+                if (json.isNull("session")) { main { onResult(null) }; return }
+                val s = json.optJSONObject("session") ?: run { main { onResult(null) }; return }
+                val sid = s.optString("id", s.optString("sessionUID", s.optString("sessionId", "")))
+                if (sid.isBlank()) { main { onResult(null) }; return }
+                main { onResult(ProfSession(sid, s.optString("courseCode", courseCode),
+                    s.optString("mode", ""), s.optString("professorId", professorId),
+                    s.optLong("startedAt", 0L), s.optInt("durationSeconds", 300))) }
+            } catch (e: Exception) { main { onResult(null) } }
         }
     })
 }
@@ -324,7 +354,8 @@ fun apiGetCourseAnalytics(professorId: String, courseCode: String, token: String
 data class QrGenerateResult(val hash: String, val expiresIn: Int, val error: String = "")
 
 fun apiQrGenerate(classId: String, token: String, onResult: (QrGenerateResult) -> Unit) {
-    val body = JSONObject().apply { put("class_id", classId) }.toString()
+    val effectiveClassId = classId.ifBlank { return }
+    val body = JSONObject().apply { put("class_id", effectiveClassId) }.toString()
     http.newCall(post("$BASE_URL/api/qr/generate", body, token)).enqueue(object : Callback {
         override fun onFailure(call: Call, e: IOException) = onResult(QrGenerateResult("", 0, e.message ?: "Network error"))
         override fun onResponse(call: Call, response: Response) {
@@ -343,7 +374,7 @@ fun apiQrValidate(classId: String, hash: String, onResult: (Boolean) -> Unit) {
     val body = JSONObject().apply {
         put("class_id", classId)
         put("hash", hash)
-        put("timestamp", System.currentTimeMillis() / 1000)  // seconds
+        put("timestamp", System.currentTimeMillis())  // epoch milliseconds — matches iOS and Abhay's swagger
     }.toString()
     Log.d(TAG, "QrValidate → class_id=$classId hash=$hash body=$body")
     http.newCall(post("$BASE_URL/api/qr/validate", body)).enqueue(object : Callback {
@@ -357,98 +388,89 @@ fun apiQrValidate(classId: String, hash: String, onResult: (Boolean) -> Unit) {
     })
 }
 
-// Course students
-fun apiGetCourseStudents(token: String, courseId: String, onResult: (List<AdminUser>?, String) -> Unit) {
-    http.newCall(get("$BASE_URL/course/$courseId/students", token)).enqueue(object : Callback {
+// Course students — derived from course attendance analytics (no dedicated gateway endpoint)
+fun apiGetCourseStudents(token: String, professorId: String, courseCode: String, onResult: (List<AdminUser>?, String) -> Unit) {
+    http.newCall(get("$BASE_URL/api/professor/$professorId/course/$courseCode/attendance", token)).enqueue(object : Callback {
         override fun onFailure(call: Call, e: IOException) = onResult(null, e.message ?: "Network error")
         override fun onResponse(call: Call, response: Response) {
             val str = response.body?.string() ?: ""
             Log.d(TAG, "CourseStudents HTTP ${response.code}: $str")
             if (str.isHtml()) { onResult(null, "HTTP ${response.code}: endpoint not found"); return }
             try {
-                val arr = try { JSONArray(str) } catch (e: Exception) { JSONObject(str).optJSONArray("students") ?: JSONArray() }
+                val arr = JSONObject(str).optJSONArray("students") ?: JSONArray()
                 onResult((0 until arr.length()).map {
                     val s = arr.getJSONObject(it)
-                    AdminUser(s.optString("_id", s.optString("id", "")), s.optString("name"), s.optString("email", ""), "student")
+                    AdminUser(s.optString("studentId", s.optString("student", "")),
+                        s.optString("name"), "", "student")
                 }, "")
             } catch (e: Exception) { onResult(null, "Parse error: ${e.message}") }
         }
     })
 }
 
-// Manual attendance bulk
-fun apiManualAttendanceBulk(token: String, sessionUID: String, studentIds: List<String>, onResult: (Boolean, String) -> Unit) {
-    val body = JSONObject().apply { put("sessionUID", sessionUID); put("studentIds", JSONArray(studentIds)) }.toString()
-    http.newCall(post("$BASE_URL/manualAttendance/bulk", body, token)).enqueue(object : Callback {
+// Manual attendance by professor — POST /api/professor/session/:sessionId/manualAttendance
+fun apiProfManualAttendance(sessionId: String, studentIds: List<String>, token: String, onResult: (Boolean, String) -> Unit) {
+    val body = JSONObject().apply { put("studentIds", JSONArray(studentIds)) }.toString()
+    http.newCall(post("$BASE_URL/api/professor/session/$sessionId/manualAttendance", body, token)).enqueue(object : Callback {
         override fun onFailure(call: Call, e: IOException) = onResult(false, e.message ?: "Network error")
         override fun onResponse(call: Call, response: Response) =
             onResult(response.isSuccessful, if (!response.isSuccessful) (response.body?.string() ?: "") else "")
     })
 }
 
-// Admin
-fun apiCreateCourse(token: String, name: String, slot: String, venue: String, instructors: List<String>, onResult: (Boolean, String) -> Unit) {
-    val body = JSONObject().apply { put("name", name); put("slot", slot); put("venue", venue); put("instructors", JSONArray(instructors)) }.toString()
-    http.newCall(post("$BASE_URL/courses", body, token)).enqueue(object : Callback {
-        override fun onFailure(call: Call, e: IOException) = onResult(false, e.message ?: "Network error")
-        override fun onResponse(call: Call, response: Response) =
-            onResult(response.isSuccessful, if (!response.isSuccessful) (response.body?.string() ?: "") else "")
-    })
-}
+// Schedule CRUD
+data class ProfScheduleItem(val index: Int, val scheduledDay: String, val startTime: String,
+    val endTime: String, val method: String, val switch: Boolean)
 
-fun apiUpdateCourse(token: String, courseId: String, name: String, slot: String, venue: String, onResult: (Boolean, String) -> Unit) {
-    val body = JSONObject().apply { put("name", name); put("slot", slot); put("venue", venue) }.toString()
-    http.newCall(put("$BASE_URL/courses/$courseId", body, token)).enqueue(object : Callback {
-        override fun onFailure(call: Call, e: IOException) = onResult(false, e.message ?: "Network error")
-        override fun onResponse(call: Call, response: Response) =
-            onResult(response.isSuccessful, if (!response.isSuccessful) (response.body?.string() ?: "") else "")
-    })
-}
-
-fun apiDeleteCourse(token: String, courseId: String, onResult: (Boolean, String) -> Unit) {
-    http.newCall(delete("$BASE_URL/courses/$courseId", token)).enqueue(object : Callback {
-        override fun onFailure(call: Call, e: IOException) = onResult(false, e.message ?: "Network error")
-        override fun onResponse(call: Call, response: Response) =
-            onResult(response.isSuccessful, if (!response.isSuccessful) (response.body?.string() ?: "") else "")
-    })
-}
-
-fun apiCreateProfessor(token: String, name: String, email: String, password: String, onResult: (Boolean, String) -> Unit) {
-    val body = JSONObject().apply { put("name", name); put("email", email); put("password", password) }.toString()
-    http.newCall(post("$BASE_URL/admin/professors", body, token)).enqueue(object : Callback {
-        override fun onFailure(call: Call, e: IOException) = onResult(false, e.message ?: "Network error")
-        override fun onResponse(call: Call, response: Response) =
-            onResult(response.isSuccessful, if (!response.isSuccessful) (response.body?.string() ?: "") else "")
-    })
-}
-
-fun apiCreateStudent(token: String, name: String, email: String, password: String, onResult: (Boolean, String) -> Unit) {
-    val body = JSONObject().apply { put("name", name); put("email", email); put("password", password) }.toString()
-    http.newCall(post("$BASE_URL/admin/students", body, token)).enqueue(object : Callback {
-        override fun onFailure(call: Call, e: IOException) = onResult(false, e.message ?: "Network error")
-        override fun onResponse(call: Call, response: Response) =
-            onResult(response.isSuccessful, if (!response.isSuccessful) (response.body?.string() ?: "") else "")
-    })
-}
-
-fun apiDeleteUser(token: String, userId: String, onResult: (Boolean, String) -> Unit) {
-    http.newCall(delete("$BASE_URL/admin/users/$userId", token)).enqueue(object : Callback {
-        override fun onFailure(call: Call, e: IOException) = onResult(false, e.message ?: "Network error")
-        override fun onResponse(call: Call, response: Response) =
-            onResult(response.isSuccessful, if (!response.isSuccessful) (response.body?.string() ?: "") else "")
-    })
-}
-
-// Face enroll (Flask)
-fun enrollFace(userId: String, base64Frames: List<String>, onResult: (EnrollResponse) -> Unit) {
-    val body = JSONObject().apply { put("user_id", userId); put("frames", JSONArray(base64Frames)) }.toString()
-    http.newCall(post("$FLASK_BASE_URL/enroll", body)).enqueue(object : Callback {
-        override fun onFailure(call: Call, e: IOException) = onResult(EnrollResponse("error", error = e.message ?: "Network error"))
+// Schedules are embedded in the course object — fetch via courses endpoint
+fun apiGetSchedules(professorId: String, courseId: String, token: String, onResult: (List<ProfScheduleItem>?, String) -> Unit) {
+    http.newCall(get("$BASE_URL/api/professor/$professorId/courses", token)).enqueue(object : Callback {
+        override fun onFailure(call: Call, e: IOException) = onResult(null, e.message ?: "Network error")
         override fun onResponse(call: Call, response: Response) {
             val str = response.body?.string() ?: ""
-            Log.d(TAG, "Enroll HTTP ${response.code}: $str")
-            try { val j = JSONObject(str); onResult(EnrollResponse(j.optString("status", "error"), j.optString("imageURL", ""))) }
-            catch (e: Exception) { onResult(EnrollResponse("error", error = "Parse error: ${e.message}")) }
+            Log.d(TAG, "GetSchedules (via courses) HTTP ${response.code}: $str")
+            if (str.isHtml()) { onResult(null, "HTTP ${response.code}: endpoint not found"); return }
+            try {
+                val courses = JSONObject(str).getJSONArray("courses")
+                val course = (0 until courses.length()).map { courses.getJSONObject(it) }
+                    .firstOrNull { it.optString("_id", it.optString("id", "")) == courseId }
+                val arr = course?.optJSONArray("schedules") ?: JSONArray()
+                onResult((0 until arr.length()).map { i ->
+                    val s = arr.getJSONObject(i)
+                    ProfScheduleItem(i, s.optString("scheduledDay"), s.optString("startTime"),
+                        s.optString("endTime"), s.optString("method", "BLE"), s.optBoolean("switch", false))
+                }, "")
+            } catch (e: Exception) { onResult(null, "Parse error: ${e.message}") }
         }
     })
 }
+
+fun apiAddSchedule(courseId: String, scheduledDay: String, startTime: String, endTime: String,
+    method: String, token: String, onResult: (Boolean, String) -> Unit) {
+    val body = JSONObject().apply {
+        put("scheduledDay", scheduledDay); put("startTime", startTime)
+        put("endTime", endTime); put("method", method)
+    }.toString()
+    http.newCall(post("$BASE_URL/api/professor/$courseId/schedule", body, token)).enqueue(object : Callback {
+        override fun onFailure(call: Call, e: IOException) = onResult(false, e.message ?: "Network error")
+        override fun onResponse(call: Call, response: Response) =
+            onResult(response.isSuccessful, if (!response.isSuccessful) (response.body?.string() ?: "") else "")
+    })
+}
+
+fun apiToggleSchedule(courseId: String, scheduleIndex: Int, enabled: Boolean, token: String, onResult: (Boolean) -> Unit) {
+    val body = JSONObject().apply { put("switch", enabled) }.toString()
+    http.newCall(patch("$BASE_URL/api/professor/$courseId/schedule/$scheduleIndex", body, token)).enqueue(object : Callback {
+        override fun onFailure(call: Call, e: IOException) = onResult(false)
+        override fun onResponse(call: Call, response: Response) = onResult(response.isSuccessful)
+    })
+}
+
+fun apiDeleteSchedule(courseId: String, scheduleIndex: Int, token: String, onResult: (Boolean) -> Unit) {
+    http.newCall(delete("$BASE_URL/api/professor/$courseId/schedule/$scheduleIndex", token)).enqueue(object : Callback {
+        override fun onFailure(call: Call, e: IOException) = onResult(false)
+        override fun onResponse(call: Call, response: Response) = onResult(response.isSuccessful)
+    })
+}
+
+// Admin — local data only, no backend calls needed
