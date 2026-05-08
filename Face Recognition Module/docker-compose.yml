@@ -1,11 +1,53 @@
 version: '3.8'
 
 services:
+  mongo:
+    image: mongo:6.0
+    container_name: face_mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    restart: always
+
+  redis:
+    image: redis:alpine
+    container_name: face_redis
+    ports:
+      - "6379:6379"
+    restart: always
+
   face-api:
     build: .
     container_name: face_recognition_microservice
     ports:
-      - "8000:8000"
-    env_file:
-      - .env  # This securely injects your MongoDB Atlas URI
-    restart: always # If the server crashes or reboots, the app turns back on automatically
+      - "9000:8000"
+    environment:
+      - MONGO_URI=mongodb://mongo:27017/
+      - REDIS_URI=redis://redis:6379/0
+    depends_on:
+      - mongo
+      - redis
+    restart: always
+
+volumes:
+  mongo_data:
+
+
+
+
+
+
+
+
+# version: '3.8'
+
+# services:
+#   face-api:
+#     build: .
+#     container_name: face_recognition_microservice
+#     ports:
+#       - "8000:8000"
+#     env_file:
+#       - .env  # This securely injects your MongoDB Atlas URI
+#     restart: always # If the server crashes or reboots, the app turns back on automatically
