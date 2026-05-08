@@ -1,72 +1,111 @@
 # Face Recognition Microservice
 
-A high-performance, containerized Face Recognition API built with FastAPI, InsightFace (MobileFaceNet), and MongoDB Atlas. Designed for robust face enrollment and real-time verification.
-
-## 🚀 Key Features
-
-- **Parallel Inference:** Processes multiple face frames simultaneously using `ThreadPoolExecutor` for fast response times.
-- **Cloud Database:** Integrated with MongoDB Atlas for persistent, instant identity lookups via indexed `user_id`s.
-- **Docker-Ready:** Fully containerized for seamless deployment without dependency or C++ compilation conflicts.
-- **Robust Matching:** Averages embeddings across multiple frames and verifies identities using Cosine Similarity.
+A high-performance, containerized face recognition microservice built using FastAPI, InsightFace (buffalo_sc), MongoDB, and Redis. The system supports robust enrollment and real-time verification with optimized embedding storage, caching, and parallel inference.
 
 ---
 
-## ⚙️ Quick Start (Docker Deployment)
+# 🚀 Features
 
-The easiest and safest way to deploy this microservic00e in production is via Docker Compose.
+- Redis-based embedding caching for fast verification
+- Local Dockerized MongoDB for persistent storage
+- InsightFace buffalo_sc embeddings (512-dimensional)
+- Parallel frame processing using ThreadPoolExecutor
+- Embedding dimension validation and sanitization
+- Atomic MongoDB embedding updates
+- FastAPI-based REST API
+- Redis failure isolation and resilient DB handling
+- Optimized for high-concurrency verification workloads
 
-### 1. Configure Environment
+---
 
-Create a `.env` file in the root directory and add your MongoDB Atlas connection string:
+# ⚙️ Quick Start (Docker)
 
-```env
-MONGO_URI="mongodb+srv://<username>:<password>@<cluster>.mongodb.net/?retryWrites=true&w=majority"
-```
+The recommended deployment method is Docker Compose.
 
-### 2. Build and Run
-
-Execute the following command on your deployment server:
+## 1. Start the Services
 
 ```bash
 docker-compose up -d --build
 ```
 
-The service will be available at `http://localhost:8000`, running 4 parallel worker processes.
+This starts:
+
+- FastAPI application
+- MongoDB
+- Redis cache
+
+The API will run on:
+
+```text
+http://localhost:9000
+```
 
 ---
 
-## 💻 Local Development Setup
+## 2. Verify Containers
 
-If you need to run the server locally (without Docker):
+Check logs:
 
-1. **Install dependencies** (Python 3.10 recommended):
-   ```bash
-   pip install -r requirements.txt
-   ```
-2. **Setup environment:** Ensure your `.env` file exists with your `MONGO_URI`.
-3. **Start the server:**
-   ```bash
-   uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4
-   ```
+```bash
+docker logs face_recognition_microservice
+```
+
+Expected logs:
+
+```text
+✅ Connected to MongoDB
+✅ Connected to Redis Cache
+```
 
 ---
 
-## 📡 API Endpoints
+# 💻 Local Development Setup
 
-### 🔹 1. Enroll Face
+## 1. Install Dependencies
 
-**POST** `/enroll-face/`
+Python 3.10 recommended.
 
-**Request Payload:**
+```bash
+pip install -r requirements.txt
+```
+
+---
+
+## 2. Configure Environment Variables
+
+Create a `.env` file:
+
+```env
+MONGO_URI="mongodb://localhost:27017/"
+REDIS_URI="redis://localhost:6379/0"
+```
+
+---
+
+## 3. Run the Server
+
+```bash
+uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4
+```
+
+---
+
+# 📡 API Endpoints
+
+## 🔹 Enroll
+
+**POST** `/enroll`
+
+### Request
 
 ```json
 {
   "user_id": "student_123",
-  "frames": ["base64_string_1", "base64_string_2", "..."]
+  "frames": ["base64_string_1", "base64_string_2"]
 }
 ```
 
-**Response:**
+### Response
 
 ```json
 {
@@ -77,21 +116,20 @@ If you need to run the server locally (without Docker):
 
 ---
 
-### 🔹 2. Verify Face
+## 🔹 Verify
 
-**POST** `/verify-face/`
+**POST** `/verify`
 
-**Request Payload:**
+### Request
 
 ```json
 {
   "user_id": "student_123",
-  "frames": ["base64_string_1", "base64_string_2", "base64_string_3"],
-  "challenges": ["blink", "turn_left"]
+  "frames": ["base64_string_1", "base64_string_2", "base64_string_3"]
 }
 ```
 
-**Response:**
+### Response
 
 ```json
 {
@@ -102,15 +140,60 @@ If you need to run the server locally (without Docker):
 
 ---
 
-## 📂 Project Architecture
+# 📂 Project Structure
 
-- `main.py`: FastAPI application entry point
-- `routes/`: Endpoint definitions (`/enroll-face`, `/verify-face`)
-- `services/face_service.py`: Core pipeline managing parallel image decoding, liveness checks, and neural network inference
-- `face_module/`: Machine learning engine (InsightFace, head pose calculations, MongoDB interactions)
+```text
+.
+├── main.py
+├── routes/
+├── services/
+├── face_module/
+├── face_module/database/
+├── requirements.txt
+├── docker-compose.yml
+└── .env
+```
 
 ---
 
-## Author
+# 🧠 Core Components
 
-- **Srikrishna Reddy** - [ES22BTECH11006](https://github.com/NaniReddyCh)
+| Component        | Description                          |
+| ---------------- | ------------------------------------ |
+| `main.py`        | FastAPI application entry point      |
+| `routes/`        | API endpoint definitions             |
+| `services/`      | Verification and enrollment pipeline |
+| `face_module/`   | InsightFace inference and utilities  |
+| `database/db.py` | MongoDB + Redis embedding layer      |
+
+---
+
+# ⚡ Performance Optimizations
+
+- Redis caching reduces repeated MongoDB reads
+- Parallel frame inference improves throughput
+- Atomic embedding updates prevent race conditions
+- Automatic cache invalidation after enrollment
+- Strict 512-dimensional embedding validation
+- Keeps only latest embeddings per user
+
+---
+
+# 🛠️ Tech Stack
+
+- FastAPI
+- InsightFace
+- MongoDB
+- Redis
+- Docker
+- NumPy
+- OpenCV
+
+---
+
+# 👨‍💻 Author
+
+**Challa Srikrishna Reddy**  
+ES22BTECH11006
+
+GitHub: https://github.com/NaniReddyCh
