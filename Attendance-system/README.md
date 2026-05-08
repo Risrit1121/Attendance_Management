@@ -18,6 +18,12 @@ IIT Hyderabad | Handover Edition | Version 2.0
 9. [Development Guide](#development-guide)
 10. [Troubleshooting](#troubleshooting)
 11. [Maintenance](#maintenance)
+12. [Changelog](#changelog)
+13. [Contributing](#contributing)
+14. [License](#license)
+12. [Changelog](#changelog)
+13. [Contributing](#contributing)
+14. [License](#license)
 
 ---
 
@@ -698,7 +704,67 @@ For issues:
 
 ---
 
-## 📄 Credits
+## � Changelog
+
+### Version 2.0 (Handover Edition)
+- **Complete system overhaul** for production readiness
+- **Multi-method attendance verification**: BLE beacons, QR codes, manual marking
+- **Intelligent automation**: Auto-session creation/end, real-time caching
+- **Real-time analytics**: Live dashboards with 3-second updates
+- **Microservice resilience**: Fallback mechanisms for external services
+- **Comprehensive API**: 60+ endpoints with full documentation
+- **Docker containerization**: Complete orchestration setup
+- **Security enhancements**: JWT authentication, CORS, input validation
+- **Performance optimizations**: Database indexing, caching strategies
+- **Fault tolerance**: Backup/restore procedures, health monitoring
+
+### Version 1.0 (Initial Release)
+- Basic attendance tracking functionality
+- Single-method verification
+- Manual session management
+- Basic analytics
+
+---
+
+## 🤝 Contributing
+
+### Development Workflow
+1. **Fork the repository**
+2. **Create a feature branch**: `git checkout -b feature/your-feature`
+3. **Make changes** following the existing code style
+4. **Test thoroughly** with both unit and integration tests
+5. **Update documentation** if needed
+6. **Commit with clear messages**: `git commit -m "Add: feature description"`
+7. **Push to branch**: `git push origin feature/your-feature`
+8. **Create Pull Request** with detailed description
+
+### Code Standards
+- **JavaScript/Node.js**: Follow Airbnb style guide
+- **React**: Use functional components with hooks
+- **MongoDB**: Use Mongoose schemas with validation
+- **API**: RESTful design with consistent error handling
+- **Documentation**: Keep READMEs updated with changes
+
+### Testing Requirements
+- **Backend**: Unit tests for all services and routes
+- **Frontend**: Component tests for UI interactions
+- **Integration**: End-to-end testing for critical flows
+- **Performance**: Load testing for high-traffic scenarios
+
+### Reporting Issues
+- Use GitHub Issues with detailed descriptions
+- Include steps to reproduce, expected vs actual behavior
+- Attach logs, screenshots, or error traces when possible
+
+---
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](../LICENSE) file for details.
+
+---
+
+## �📄 Credits
 
 **Digital Intelligent Attendance Management System (DIAMS)**  
 IIT Hyderabad

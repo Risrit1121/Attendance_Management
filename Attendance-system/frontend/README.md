@@ -873,36 +873,64 @@ F12 → Network tab
 
 ---
 
-## 💬 Notes for Team
+## � Changelog
 
-### Project Flow
+### Version 2.0 (Handover Edition)
+- **Complete UI redesign** with modern React architecture
+- **Role-based dashboards**: Separate interfaces for professors, admins, students
+- **Real-time updates**: 3-second polling for live attendance data
+- **Responsive design**: Mobile-first approach with Tailwind CSS
+- **Comprehensive API integration**: 155+ endpoint wrappers
+- **State management**: React Context for authentication and scheduling
+- **Component library**: Reusable UI components (Button, Modal, Table, etc.)
+- **Charts and analytics**: Interactive visualizations with Recharts
+- **Session management**: BLE minor display, QR code generation
+- **Docker containerization**: Production-ready build process
 
-```
-User visits http://localhost:3000
-   ├─ Check localStorage for JWT
-   ├─ If no JWT → Show Login page
-   ├─ If JWT → Verify in AuthContext
-   ├─ If valid → Redirect to role dashboard
-   └─ If invalid → Show Login again
-```
+### Version 1.0 (Initial Release)
+- Basic React application setup
+- Simple login and dashboard
+- Basic attendance viewing
+- Static UI components
 
-### Common Tasks
+---
 
-| Task | Files to Edit |
-|------|--------------|
-| Add page | `src/pages/NewPage.js`, `App.js`, `Layout.js` |
-| Add API call | `src/api/client.js`, then use in page |
-| Add component | `src/components/` + use in pages |
-| Change styling | `tailwind.config.js` or `src/index.css` |
-| Change layout | `src/components/Layout.js` |
-| Add state | `src/context/NewContext.js` |
+## 🤝 Contributing
 
-### Critical Code Paths
+### Adding New Pages
+1. **Create component** in `src/pages/NewPage.js`
+2. **Add route** in `App.js` with appropriate protection
+3. **Update navigation** in `Layout.js` if needed
+4. **Add API calls** in `client.js` if required
+5. **Test responsiveness** on mobile and desktop
+6. **Update this README** with page description
 
-1. **Login**: `Login.js` → `AuthContext.js` → redirect to dashboard
-2. **API Call**: Page component → `client.js` → Backend → Response
-3. **Real-time Update**: Polling loop (3s interval) → State → Re-render
-4. **Role-based Access**: `AuthContext.user.role` → Show/hide pages
+### UI Components
+1. **Create component** in `src/components/` following existing patterns
+2. **Use Tailwind classes** for styling
+3. **Export from UI.js** if reusable
+4. **Add prop validation** with PropTypes
+5. **Test interactions** in component tests
+
+### Styling Guidelines
+- **Tailwind utility classes**: Prefer over custom CSS
+- **Responsive design**: Use `sm:`, `md:`, `lg:` breakpoints
+- **Color scheme**: Blue primary, gray neutrals, semantic colors
+- **Typography**: Consistent heading hierarchy
+- **Spacing**: Use Tailwind spacing scale (4px increments)
+
+### Best Practices
+- **Component composition**: Build complex UIs from simple components
+- **State management**: Use Context for global state, local state for components
+- **Performance**: Memoize expensive operations, lazy load heavy components
+- **Accessibility**: Add ARIA labels, keyboard navigation support
+- **Error handling**: Graceful error states with user-friendly messages
+
+---
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](../../LICENSE) file for details.
 
 ---
 

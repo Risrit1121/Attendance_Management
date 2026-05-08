@@ -1,45 +1,179 @@
+# services:
+
+#   mongo:
+#     image: mongo:7
+#     container_name: attendance-mongo
+#     restart: unless-stopped
+#     environment:
+#       MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER:-admin}
+#       MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASS:-secret}
+#       MONGO_INITDB_DATABASE: attendance
+#     volumes:
+#       - mongo-data:/data/db
+#     # ports:
+#     #   - "27017:27017"          # remove this line if you don't need external access
+#     healthcheck:
+#       test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+#       interval: 10s
+#       timeout: 5s
+#       retries: 5
+
+#   backend:
+#     build:
+#       context: ./backend
+#       dockerfile: Dockerfile
+#     container_name: attendance-backend
+#     restart: unless-stopped
+#     depends_on:
+#       mongo:
+#         condition: service_healthy
+#     environment:
+#       PORT: 4040
+#       MONGO_URI: mongodb://${MONGO_USER:-admin}:${MONGO_PASS:-secret}@mongo:27017/attendance?authSource=admin
+#       JWT_SECRET: 54657d5cdc6b81baf001f492ce508a16c9ac8dd33e5829692006b8a73b98844f3d389e92fdce5220ecf4606f9e0b7e6771382e5afc72b2dc2c0a4ed41f4b4f26
+#       QR_SECRET: 54657d5cdc6b81baf001f492ce508a16c9ac8dd33e5829692006b8a73b98844f3d389e92fdce5220ecf4606f9e0b7e6771382e5afc72b2dc2c0a4ed41f4b4f26
+#       FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+#       AT_RISK_THRESHOLD: ${AT_RISK_THRESHOLD:-75}
+#       BACKUP_DIR: /app/backups
+#     volumes:
+#       - backups:/app/backups
+#     ports:
+#       - "4040:4040"
+
+# volumes:
+#   mongo-data:
+#   backups:
+
+##############################################################################
+# Attendance System — docker-compose.yml
+#
+# Services:
+#   mongo      — MongoDB 7, data in named volume (local DB, not Atlas)
+#   backend    — Node.js API on port 4040
+#   frontend   — Nginx serving built React bundle on port 3000
+#
+# BLE / QR microservice:
+#   Assumed to be running as a separate process on the HOST at port 8000
+#   (e.g. `node server.js` in the ble-qr directory).
+#   Backend reaches it via host.docker.internal:8000, which Docker resolves
+#   to the host machine's loopback interface on Linux / Mac / Windows.
+#   On Linux you must also pass --add-host (done in backend's extra_hosts).
+#
+# Usage:
+#   1. Copy .env.example → .env and fill in secrets
+#   2. docker compose up -d --build
+#   3. Open http://<server-ip>:3000
+#
+# To rebuild after code changes:
+#   docker compose up -d --build backend   (backend only)
+#   docker compose up -d --build frontend  (frontend only)
+##############################################################################
 services:
 
+  # ── MongoDB ─────────────────────────────────────────────────────────────────
   mongo:
     image: mongo:7
-    container_name: attendance-mongo
+    container_name: attendance_mongo
     restart: unless-stopped
-    environment:
-      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER:-admin}
-      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASS:-secret}
-      MONGO_INITDB_DATABASE: attendance
+    # Do NOT expose 27017 to the host unless you need external DB access.
+    # Backend reaches it via the internal Docker network name "mongo".
+    # expose:
+    #   - "27017"
     volumes:
-      - mongo-data:/data/db
-    # ports:
-    #   - "27017:27017"          # remove this line if you don't need external access
+      - mongo_data:/data/db          # persistent DB
+      - mongo_cfg:/data/configdb
+    environment:
+      MONGO_INITDB_DATABASE: attendance
     healthcheck:
       test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 20s
+    networks:
+      - app_net
 
+  # ── Backend ──────────────────────────────────────────────────────────────────
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    container_name: attendance-backend
+    container_name: attendance_backend
     restart: unless-stopped
+    ports:
+      - "4040:4040"           # exposed so mobile apps / ESP32 can hit it directly
     depends_on:
       mongo:
         condition: service_healthy
+    # env_file:
+    #   - .env                  # secrets live here, never in source control
     environment:
-      PORT: 4040
-      MONGO_URI: mongodb://${MONGO_USER:-admin}:${MONGO_PASS:-secret}@mongo:27017/attendance?authSource=admin
-      JWT_SECRET: 54657d5cdc6b81baf001f492ce508a16c9ac8dd33e5829692006b8a73b98844f3d389e92fdce5220ecf4606f9e0b7e6771382e5afc72b2dc2c0a4ed41f4b4f26
-      QR_SECRET: 54657d5cdc6b81baf001f492ce508a16c9ac8dd33e5829692006b8a73b98844f3d389e92fdce5220ecf4606f9e0b7e6771382e5afc72b2dc2c0a4ed41f4b4f26
+      # ── Database ────────────────────────────────────────────────────────────
+      # Connects to the local mongo service by name.
+      # Override in .env if you use Atlas instead.
+      MONGO_URI: mongodb://mongo:27017/attendance
+      MONGODB_URI: mongodb://mongo:27017/attendance
+      # ── BLE / QR microservice ────────────────────────────────────────────────
+      # host.docker.internal resolves to the host machine.
+      # On Linux, this is injected via extra_hosts below.
+      BLE_SERVICE_URL: http://host.docker.internal:8000
+      QR_SERVICE_URL:  http://host.docker.internal:8000
+
+      # ── Server ──────────────────────────────────────────────────────────────
+      PORT:         4040
+      NODE_ENV:     production
+
+      # ── URLs (used by keepAlive pinger) ─────────────────────────────────────
+      # Set these to the public-facing URLs of your server if you have a domain.
+      # If not, use http://<server-ip>:4040 and http://<server-ip>:3000.
+      BACKEND_URL:  ${BACKEND_URL:-http://localhost:4040}
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
-      AT_RISK_THRESHOLD: ${AT_RISK_THRESHOLD:-75}
+
+      # ── Backup storage ───────────────────────────────────────────────────────
       BACKUP_DIR: /app/backups
     volumes:
-      - backups:/app/backups
+      - backend_backups:/app/backups   # nightly JSON backups
+    # ── host.docker.internal on Linux ─────────────────────────────────────────
+    # Docker Desktop (Mac/Win) injects this automatically. On Linux we must
+    # add it manually so the backend can reach the BLE/QR service on the host.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:4040/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks:
+      - app_net
+
+  # ── Frontend ─────────────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # Injected at build time into the React bundle.
+        # Must be the URL the BROWSER will use to reach the backend —
+        # i.e. the public IP/domain, not an internal Docker name.
+        # If you have a domain: https://api.yourdomain.com
+        # Without a domain:     http://<server-ip>:4040
+        VITE_API_URL: ${BACKEND_PUBLIC_URL:-http://localhost:4040}
+    container_name: attendance_frontend
+    restart: unless-stopped
     ports:
-      - "4040:4040"
+      - "3000:80"             # browse http://<server-ip>:3000
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - app_net
 
 volumes:
-  mongo-data:
-  backups:
+  mongo_data:
+  mongo_cfg:
+  backend_backups:
+
+networks:
+  app_net:
+    driver: bridge

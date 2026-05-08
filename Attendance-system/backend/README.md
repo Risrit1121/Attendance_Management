@@ -970,37 +970,57 @@ npm start
 
 ---
 
-## 💬 Notes for Team
+## � Changelog
 
-### Key Files to Know
+### Version 2.0 (Handover Edition)
+- **Complete API redesign** with 60+ RESTful endpoints
+- **Multi-method attendance support**: BLE, QR, manual verification
+- **Background job system**: Cron-based automation (4 jobs)
+- **Real-time caching**: Per-student bucket service with intersection logic
+- **Microservice integration**: Proxy with fallback for external services
+- **Security hardening**: JWT auth, input validation, CORS
+- **Database optimization**: Indexing, connection pooling, aggregation pipelines
+- **Comprehensive logging**: Request tracking, error handling
+- **Docker containerization**: Production-ready deployment
+- **API documentation**: Swagger/OpenAPI specification
 
-| File | Purpose | When to Edit |
-|------|---------|-------------|
-| `server.js` | Entry point | Changing app config |
-| `config/db.js` | DB connection | Database connection issues |
-| `middleware/auth.js` | Authentication | Changing auth logic |
-| `routes/*.js` | API endpoints | Adding/modifying endpoints |
-| `models/*.js` | Data schemas | Changing data structure |
-| `services/` | Business logic | Core functionality changes |
-| `jobs/index.js` | Background jobs | Scheduling changes |
+### Version 1.0 (Initial Release)
+- Basic Express server setup
+- Simple attendance CRUD operations
+- Basic authentication
+- MongoDB integration
 
-### Common Modifications
+---
 
-**Add a new course field:**
-1. Update `models/Course.js` schema
-2. Update creation in `routes/courses.js`
-3. Run `npm run indexes` if needed
-4. Test with `npm test`
+## 🤝 Contributing
 
-**Add an analytics metric:**
-1. Create calculation in `services/`
-2. Add route in `routes/analytics.js`
-3. Add to frontend in `frontend/src/api/client.js`
+### Adding New Endpoints
+1. **Define route** in appropriate `routes/*.js` file
+2. **Add validation** using middleware
+3. **Implement business logic** in `services/` if complex
+4. **Update Swagger documentation** in `swagger.yaml`
+5. **Add tests** in test suite
+6. **Update this README** with new endpoint details
 
-**Change backup frequency:**
-1. Edit `jobs/index.js` cron schedule
-2. Update `services/backupService.js` logic
-3. Test backup creation
+### Database Changes
+1. **Modify schema** in `models/*.js`
+2. **Run migration** if needed (currently manual)
+3. **Update indexes** in `scripts/db-indexes.js`
+4. **Test queries** for performance
+5. **Document changes** in model comments
+
+### Best Practices
+- **Error handling**: Use try/catch with proper HTTP status codes
+- **Logging**: Use `logBuffer.js` for consistent logging
+- **Validation**: Sanitize all inputs, validate data types
+- **Security**: Never log sensitive data, use parameterized queries
+- **Performance**: Monitor query performance, use indexes appropriately
+
+---
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](../../LICENSE) file for details.
 
 ---
 
