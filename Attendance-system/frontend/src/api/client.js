@@ -1,7 +1,16 @@
 import axios from "axios";
 
+// Priority order for baseURL:
+//  1. localStorage "api_url"  — set via the Settings page for local dev overrides
+//  2. VITE_API_URL            — injected at Docker build time (docker-compose build arg)
+//  3. /api                    — relative path fallback, nginx proxies /api/ → backend:4040
+const BASE_URL =
+  localStorage.getItem("api_url") ||
+  import.meta.env.VITE_API_URL   ||
+  "/api";
+
 const API = axios.create({
-  baseURL: localStorage.getItem("api_url") || "https://attendance-management-gazr.onrender.com",
+  baseURL: BASE_URL,
   // Render free tier cold-starts in 30-50 s. 10 s was causing silent timeouts
   // that left every page showing 0 courses / 0 analytics. 55 s gives the server
   // enough time to wake, with the retry utility layered on top for transient

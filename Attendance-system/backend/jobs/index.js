@@ -13,17 +13,17 @@ const { rebuildAllBuckets }          = require('../services/bucketService');
 const { autoCreateFallbackSessions } = require('../services/autoSessionService');
 const { autoEndExpiredSessions }     = require('../services/autoEndSessionService');
 const { runBackup }                  = require('../services/backupService');
-const { startKeepAlive }             = require('../services/keepAlive');
+// const { startKeepAlive }             = require('../services/keepAlive');
 
 function startAllJobs() {
-  // ── Auto-session fallback: every minute ────────────────────────────────────
-  cron.schedule('* * * * *', async () => {
+  // ── Auto-session fallback: every 5 minute ────────────────────────────────────
+  cron.schedule('*/5 * * * *', async () => {
     try { await autoCreateFallbackSessions(); }
     catch (e) { console.error('[Cron:AutoSession]', e.message); }
   });
 
-  // ── Auto-end expired sessions: every minute ────────────────────────────────
-  cron.schedule('* * * * *', async () => {
+  // ── Auto-end expired sessions: every 5 minute ────────────────────────────────
+  cron.schedule('*/5 * * * *', async () => {
     try { await autoEndExpiredSessions(); }
     catch (e) { console.error('[Cron:AutoEnd]', e.message); }
   });
@@ -43,7 +43,7 @@ function startAllJobs() {
   });
 
   // ── Keep Render free-tier services alive (ping every 14 min) ──────────────
-  startKeepAlive();
+  // startKeepAlive();
 
   console.log('[Cron] All jobs started');
 }
